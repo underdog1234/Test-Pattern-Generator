@@ -1,0 +1,1032 @@
+// ---------------------------------------------------------------------------
+// Animated LED wall test pattern - shared renderer.
+//
+// A single pure function (`drawTestPatternFrame`) draws one frame of the
+// animation onto any canvas context. It is called identically by the live
+// requestAnimationFrame loop in TestPatternView.tsx and by the WebM recorder's
+// frame loop, so the live tab and the downloaded video are pixel-identical.
+//
+// Design: the RGB checkerboard and the greyscale gradient are defined as
+// repeating patterns in WALL pixel-coordinate space (not per-panel), then
+// revealed through each panel's own clip mask (true shape + rotation + the
+// always-on front-view mirror). This is what makes uniform grids, freely
+// placed/imported layouts, mixed MG9/MT and rotated/shaped panels all work
+// through one code path with no special-casing.
+// ---------------------------------------------------------------------------
+
+import {
+  type Cell,
+  type PanelTypeKey,
+  PANEL_TYPES,
+  PANEL_VARIANTS,
+  cellRect,
+  cellPanelType,
+  isPanelHead,
+  applyPanelFrame,
+  tracePanelShapePath,
+} from "../App";
+import {
+  activeBBox,
+  gridRefLabel,
+  mirrorGridRef,
+  panelFramePoint,
+  panelGridRefs,
+  panelShapeLabelPoint,
+  panelShapeNeedsInsetLabel,
+  type RectMm,
+} from "../model/panels";
+import { type Obstruction } from "../obstructions/obstructionModel";
+import { drawObstructions } from "../obstructions/drawObstructions";
+
+export type TestPatternProject = {
+  projectName: string;
+  /** Name of this LED surface/sub-screen, if the project defines one. */
+  surfaceName?: string;
+  panelType: PanelTypeKey;
+  panels: Cell[];
+  /** The project's sub-screens, so each one can be given its own independently-animating pattern (see TestPatternSurface). Omit for a single-surface wall. */
+  subScreens?: Array<{ id: string; name: string; color: string }>;
+  /** Things standing in front of the LED, drawn over the finished pattern. Omit when there are none. */
+  obstructions?: Obstruction[];
+  /**
+   * The WHOLE layout's bbox in workspace mm, which obstruction offsets are
+   * measured against. Needed when `panels` is only part of the wall (one
+   * sub-screen): the obstruction has not moved just because one screen is
+   * being rendered. Omit for a whole-wall render.
+   */
+  obstructionLayoutBBoxMm?: RectMm;
+};
+
+/**
+ * One independently-animating LED surface. A wall with sub-screens produces
+ * one of these per sub-screen (plus an "Unassigned" one if any panels aren't
+ * in a sub-screen); a wall without them produces exactly one covering
+ * everything, which is byte-for-byte the old single-surface behaviour.
+ *
+ * `bbox` is in DISPLAY pixel space (post front-view mirror, integer-snapped),
+ * because that is the space the pattern layer is built and blitted in.
+ */
+export type TestPatternSurface = {
+  id: string;
+  name: string;
+  /** The sub-screen's own identity colour, or null for a whole-wall surface. */
+  color: string | null;
+  /**
+   * True when this is a real sub-screen the project declared, rather than the
+   * whole-wall or "Unassigned" catch-all. A declared sub-screen is named on
+   * the pattern even when it is the only surface there - rendering one screen
+   * on its own is exactly when its name matters most, because the shape alone
+   * no longer says which screen you are looking at.
+   */
+  isSubScreen: boolean;
+  cells: Cell[];
+  bbox: RectMm;
+};
+
+export const WHOLE_WALL_SURFACE_ID = "__whole__";
+export const UNASSIGNED_SURFACE_ID = "__unassigned__";
+
+export type TestPatternLayout = {
+  activePanels: Cell[];
+  wallBBox: RectMm;
+  W: number;
+  H: number;
+  /** Recommended Content Resolution width - always equals W (MT's non-square
+   * pixel pitch only affects the vertical axis) - kept explicit alongside
+   * contentPixelH so the pair reads as one resolution, not an implicit W. */
+  contentPixelW: number;
+  /** Recommended Content Resolution height - equals H unless every active
+   * panel is MT (a transparent panel missing every second LED row, so its
+   * vertical pixel pitch is twice its horizontal pitch and H alone doesn't
+   * represent the wall's true physical aspect ratio) - see drawInfoText and
+   * getContentPixelHeight. This is the resolution every generated pattern
+   * (RGB/checkerboard, greyscale, panel grid/outlines, alignment overlay,
+   * info text - everything drawTestPatternFrame draws) is actually rendered
+   * at; W/H above stay the true physical/native LED resolution, unchanged. */
+  contentPixelH: number;
+  /** Each panel's TRUE native-resolution pixel rect (back view, unmirrored),
+   * keyed by cell id - see computeTestPatternLayout. */
+  panelPixelRects: Map<string, RectMm>;
+  totalPanels: number;
+  activeColsCount: number;
+  activeRowsCount: number;
+  wallWidthM: number;
+  wallHeightM: number;
+  projectName: string;
+  surfaceName: string;
+  /** RGB checkerboard cell size, in canvas px - one full panel footprint for
+   * the project's panel type (see buildRgbTile). */
+  tileWidthPx: number;
+  tileHeightPx: number;
+  /** Independently-animating surfaces (one per sub-screen, or a single whole-wall entry). Every active panel appears in exactly one. */
+  surfaces: TestPatternSurface[];
+  rowLabel: (cell: Cell) => string;
+  colLabel: (cell: Cell) => string;
+  /** Obstructions over this surface - offsets from obstructionLayoutBBox, converted to pixels at draw time. */
+  obstructions: Obstruction[];
+  /** The whole layout the obstruction offsets are measured against (the wall itself for a whole-wall render). */
+  obstructionLayoutBBox: RectMm;
+};
+
+// Pixel rect in canvas/output space (post front-view mirror). Snap both edges
+// to the integer pixel grid - not just the width/height - so adjacent panels'
+// rounded edges stay consistent with each other (no accumulating gaps) and a
+// 1px stroke along that edge lands crisply on one pixel row/column instead of
+// straddling two.
+const snapRectPx = (r: RectMm): RectMm => {
+  const x0 = Math.round(r.x);
+  const y0 = Math.round(r.y);
+  const x1 = Math.round(r.x + r.w);
+  const y1 = Math.round(r.y + r.h);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+};
+
+// One full loop of the animation, in seconds. Both the RGB slide and the
+// greyscale gradient return to their exact starting phase at this mark, so a
+// video recorded for exactly this long loops seamlessly on repeat.
+export const LOOP_SECONDS = 20;
+// Cap the animation's internal draw rate - this is an alignment-check tool,
+// not a smooth video, and a lower rate keeps hundreds of panels responsive.
+export const DRAW_FPS = 24;
+
+// RGB tile = one full panel footprint (of the project's own panel type) at
+// the wall's native pixel pitch, so checkerboard cells land on real panel
+// boundaries and each panel reads as a single solid colour - MG9 is a 500mm
+// square module; MT is 1000x500mm (twice as wide), so its tile is twice as
+// wide too (see computeTestPatternLayout's tileWidthPx/tileHeightPx).
+const RGB_COLORS = ["#ff0000", "#00ff00", "#0000ff"];
+
+let cachedRgbTile: { tileW: number; tileH: number; canvas: HTMLCanvasElement } | null = null;
+// Keyed caches rather than single slots: a multi-sub-screen wall needs one
+// grey tile per distinct surface diagonal and one pattern layer per surface,
+// all live within the SAME frame - single-slot caches would thrash, rebuilding
+// every canvas for every surface on every frame.
+const greyTileCache = new Map<number, HTMLCanvasElement>();
+const patternLayerCache = new Map<string, HTMLCanvasElement>();
+const MAX_CACHED_LAYERS = 24;
+
+// Staggered diagonal R/G/B supercell: row R, col C -> colour (R+C) mod 3. This
+// makes adjacent panels differ AND makes each row offset from the one above,
+// and tiles seamlessly in both axes because the pattern's own period matches
+// the tile size - no per-panel logic needed. Tile cells are `tileW x tileH`
+// (one full panel footprint), not necessarily square - MT panels are twice
+// as wide as they are tall.
+const buildRgbTile = (tileW: number, tileH: number): HTMLCanvasElement => {
+  const c = document.createElement("canvas");
+  c.width = tileW * 3;
+  c.height = tileH * 3;
+  const ctx = c.getContext("2d")!;
+  for (let row = 0; row < 3; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      ctx.fillStyle = RGB_COLORS[(row + col) % 3];
+      ctx.fillRect(col * tileW, row * tileH, tileW, tileH);
+    }
+  }
+  return c;
+};
+
+const getRgbTile = (tileW: number, tileH: number): HTMLCanvasElement => {
+  if (cachedRgbTile && cachedRgbTile.tileW === tileW && cachedRgbTile.tileH === tileH) return cachedRgbTile.canvas;
+  const canvas = buildRgbTile(tileW, tileH);
+  cachedRgbTile = { tileW, tileH, canvas };
+  return canvas;
+};
+
+// Seamless diagonal greyscale sweep: a single band travels corner-to-corner
+// across the WHOLE wall (period = the canvas diagonal, not a small repeating
+// cell), so only one bright band is ever visible at a time, at wall scale.
+// Brightness is a function of (x+y) mod `period` folded into a
+// black->white->black triangle wave, which is exactly what a diagonal linear
+// gradient from (0,0) to (period,period) with alternating floor/peak stops
+// produces - periodic in (x+y), so it still repeats with no seam as it slides
+// through a full loop.
+const buildGreyTile = (period: number): HTMLCanvasElement => {
+  const c = document.createElement("canvas");
+  c.width = period;
+  c.height = period;
+  const ctx = c.getContext("2d")!;
+  // Floor of #404040 (not black): with a 'multiply' blend, a black stop would
+  // briefly extinguish a panel's colour entirely. A dim floor keeps the
+  // brightness sweep clearly visible while every panel stays identifiable.
+  const grad = ctx.createLinearGradient(0, 0, period, period);
+  grad.addColorStop(0, "#404040");
+  grad.addColorStop(0.25, "#ffffff");
+  grad.addColorStop(0.5, "#404040");
+  grad.addColorStop(0.75, "#ffffff");
+  grad.addColorStop(1, "#404040");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, period, period);
+  return c;
+};
+
+const getGreyTile = (period: number): HTMLCanvasElement => {
+  const cached = greyTileCache.get(period);
+  if (cached) return cached;
+  const canvas = buildGreyTile(period);
+  if (greyTileCache.size >= MAX_CACHED_LAYERS) greyTileCache.delete(greyTileCache.keys().next().value as number);
+  greyTileCache.set(period, canvas);
+  return canvas;
+};
+
+const getPatternLayer = (surfaceId: string, w: number, h: number): HTMLCanvasElement => {
+  const key = `${surfaceId}:${w}x${h}`;
+  const cached = patternLayerCache.get(key);
+  if (cached) return cached;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, w);
+  canvas.height = Math.max(1, h);
+  if (patternLayerCache.size >= MAX_CACHED_LAYERS) patternLayerCache.delete(patternLayerCache.keys().next().value as string);
+  patternLayerCache.set(key, canvas);
+  return canvas;
+};
+
+
+/**
+ * Recommended Content Resolution height for a wall built entirely from one
+ * panel type: `H` unless every panel in `panels` is MT, in which case `H` is
+ * scaled by MT's vertical-pitch ratio (its own physical size vs pixel count,
+ * not hardcoded to 2 - though it evaluates to exactly 2 for MT's real pitch:
+ * a transparent panel missing every second LED row) - so content authored
+ * assuming square pixels displays correctly proportioned once MT's own
+ * non-square-pixel grid receives it. A mixed MG9+MT wall keeps the plain `H`
+ * (no blended "content resolution" - same conservative scope used elsewhere
+ * for mixed walls). Shared by computeTestPatternLayout below and App.tsx's
+ * Wall Summary/PDF stat, so there's exactly one source of truth.
+ *
+ * Computed lazily inside the function (not as a module-level constant) -
+ * App.tsx and this file import from each other, and a top-level
+ * `PANEL_TYPES.MT...` reference here would race App.tsx's own module
+ * initialization depending on which side of the cycle loads first.
+ */
+export function getContentPixelHeight(panels: Cell[], H: number): number {
+  const allMt = panels.length > 0 && panels.every((cell) => cellPanelType(cell) === "MT");
+  if (!allMt) return H;
+  const scaleY = (PANEL_TYPES.MT.h * 1000 / PANEL_TYPES.MT.pixH) / (PANEL_TYPES.MT.w * 1000 / PANEL_TYPES.MT.pixW);
+  return Math.round(H * scaleY);
+}
+
+// Compute the wall geometry once (on project load), not per animation frame.
+export const computeTestPatternLayout = (project: TestPatternProject): TestPatternLayout => {
+  const activePanels = project.panels.filter((cell) => isPanelHead(cell));
+  const wallBBox = activeBBox(activePanels.map(cellRect));
+  // Row/column references come off the wall's own module grid, so a panel
+  // sitting half a module out reads as the two rows it really straddles
+  // rather than inventing a row of its own (see panelGridRefs). This
+  // replaced banding panels into rows and columns by proximity, which gave
+  // such a panel a row of its own and shifted every number after it.
+  const gridRefs = panelGridRefs(activePanels, cellRect);
+
+  // Each panel's TRUE native-resolution pixel rect (back view, unmirrored):
+  // its own pixW x pixH from PANEL_TYPES (e.g. MT is 256x64, NOT a
+  // physical-size scaling of MG9's pitch), placed at its own mm position
+  // converted to pixels via that panel type's own px-per-mm ratio (per
+  // axis, and swapped the same way cellRect's own mm footprint swaps on a
+  // 90/270 rotation, so the ratio stays internally consistent).
+  //
+  // Deliberately NOT accumulated band-by-band (tightly packing each row's
+  // panels left-to-right in array order): that silently closes up any gap
+  // from a missing/removed panel in the middle of a row, shifting every
+  // panel after the gap out of its true position - the wall's pixel
+  // positions must reflect real relative mm spacing, gaps included, or the
+  // pattern no longer matches which physical panel is which.
+  const panelPixelRects = new Map<string, RectMm>();
+  activePanels.forEach((cell) => {
+    const rect = cellRect(cell);
+    const spec = PANEL_TYPES[cellPanelType(cell)];
+    const rot = ((Math.round((cell.rotation ?? 0) / 90) * 90) % 360 + 360) % 360;
+    const swapped = rot === 90 || rot === 270;
+    const nativeW = swapped ? spec.pixH : spec.pixW;
+    const nativeH = swapped ? spec.pixW : spec.pixH;
+    const physWMm = (swapped ? spec.h : spec.w) * 1000;
+    const physHMm = (swapped ? spec.w : spec.h) * 1000;
+    const x = Math.round(((rect.x - wallBBox.x) / physWMm) * nativeW);
+    const y = Math.round(((rect.y - wallBBox.y) / physHMm) * nativeH);
+    panelPixelRects.set(cell.id, { x, y, w: nativeW, h: nativeH });
+  });
+  let W = 0;
+  let H = 0;
+  panelPixelRects.forEach((r) => {
+    W = Math.max(W, r.x + r.w);
+    H = Math.max(H, r.y + r.h);
+  });
+  W = Math.max(1, W);
+  H = Math.max(1, H);
+
+  // RGB tile size = one full panel footprint at its OWN native resolution
+  // (not a physical-size scaling), so each panel shows a single solid
+  // colour. Derived from the panels actually on the wall (most common type
+  // wins) rather than the project's panelType default, which can go stale
+  // if panels were changed individually after the fact.
+  const typeCounts = new Map<PanelTypeKey, number>();
+  activePanels.forEach((cell) => {
+    const type = cellPanelType(cell);
+    typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1);
+  });
+  let dominantType: PanelTypeKey = project.panelType;
+  let dominantCount = -1;
+  typeCounts.forEach((count, type) => {
+    if (count > dominantCount) {
+      dominantCount = count;
+      dominantType = type;
+    }
+  });
+  const tileSpec = PANEL_TYPES[dominantType] ?? PANEL_TYPES.MG9;
+  const tileWidthPx = tileSpec.pixW;
+  const tileHeightPx = tileSpec.pixH;
+
+  const contentPixelW = W;
+  const contentPixelH = getContentPixelHeight(activePanels, H);
+
+  // Independently-animating surfaces. Built here (not per frame) because they
+  // are pure geometry, and in DISPLAY space - the same mirrored, integer-
+  // snapped space each panel is actually drawn in - so a surface's pattern
+  // layer lines up with its panels with no further conversion.
+  const displayRect = (cell: Cell): RectMm => {
+    const r = panelPixelRects.get(cell.id) ?? { x: 0, y: 0, w: 0, h: 0 };
+    return snapRectPx({ x: W - r.x - r.w, y: r.y, w: r.w, h: r.h });
+  };
+  const bboxOf = (cells: Cell[]): RectMm => {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    cells.forEach((cell) => {
+      const r = displayRect(cell);
+      minX = Math.min(minX, r.x);
+      minY = Math.min(minY, r.y);
+      maxX = Math.max(maxX, r.x + r.w);
+      maxY = Math.max(maxY, r.y + r.h);
+    });
+    if (!Number.isFinite(minX)) return { x: 0, y: 0, w: 0, h: 0 };
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  };
+
+  const surfaces: TestPatternSurface[] = [];
+  const declaredSubScreens = project.subScreens ?? [];
+  declaredSubScreens.forEach((screen) => {
+    const cells = activePanels.filter((cell) => cell.subScreenId === screen.id);
+    if (!cells.length) return;
+    surfaces.push({ id: screen.id, name: screen.name, color: screen.color, isSubScreen: true, cells, bbox: bboxOf(cells) });
+  });
+  const claimed = new Set(surfaces.flatMap((surface) => surface.cells.map((cell) => cell.id)));
+  const leftover = activePanels.filter((cell) => !claimed.has(cell.id));
+  if (leftover.length) {
+    // No sub-screens at all (the common case, and every project saved before
+    // the feature existed) collapses to exactly one whole-wall surface, which
+    // renders identically to the original single-pattern behaviour.
+    const wholeWall = surfaces.length === 0;
+    surfaces.push({
+      id: wholeWall ? WHOLE_WALL_SURFACE_ID : UNASSIGNED_SURFACE_ID,
+      name: wholeWall ? (project.surfaceName || "").trim() : "Unassigned",
+      color: null,
+      isSubScreen: false,
+      cells: leftover,
+      bbox: bboxOf(leftover),
+    });
+  }
+
+  return {
+    activePanels,
+    wallBBox,
+    W,
+    H,
+    contentPixelW,
+    contentPixelH,
+    panelPixelRects,
+    totalPanels: activePanels.length,
+    // The rows and columns of the wall's own module grid, the same ones the
+    // panel labels count off - NOT the band counts, which split a panel set
+    // half a module out into a band of its own and so report a stepped wall
+    // as taller and wider than anyone reading the labels would call it.
+    activeColsCount: gridRefs.cols,
+    activeRowsCount: gridRefs.rows,
+    wallWidthM: wallBBox.w / 1000,
+    wallHeightM: wallBBox.h / 1000,
+    projectName: (project.projectName || "").trim(),
+    surfaceName: (project.surfaceName || "").trim(),
+    tileWidthPx,
+    tileHeightPx,
+    surfaces,
+    obstructions: project.obstructions ?? [],
+    obstructionLayoutBBox: project.obstructionLayoutBBoxMm ?? wallBBox,
+    rowLabel: (cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.rows),
+    // Column numbers must read from the FRONT (the pattern is always
+    // rendered mirrored - see dispRectPx below), not the panel's raw
+    // back-view column - otherwise the printed number doesn't match the
+    // column the audience actually sees it in.
+    colLabel: (cell) => gridRefLabel(mirrorGridRef(gridRefs.refs.get(cell.id)?.cols, gridRefs.cols)),
+  };
+};
+
+// Always front view (mirrored), independent of any on-screen toggle - matches
+// the static PNG test-pattern exporter's convention. Mirrors the panel's
+// native-pixel rect horizontally within the total wall pixel width.
+const dispRectPx = (layout: TestPatternLayout, cell: Cell): RectMm => {
+  const r = layout.panelPixelRects.get(cell.id);
+  if (!r) return { x: 0, y: 0, w: 0, h: 0 };
+  return { x: layout.W - r.x - r.w, y: r.y, w: r.w, h: r.h };
+};
+
+// Where the info block sits, per layout - the search below walks every panel,
+// so it is done once and kept rather than repeated sixty times a second.
+const infoAnchorCache = new WeakMap<TestPatternLayout, { x: number; y: number }>();
+
+/**
+ * Where to put the wall info text.
+ *
+ * The middle of the wall is the right place on a plain rectangle, and the
+ * wrong place on anything else: a stepped or ring-shaped wall has no panels
+ * in the middle of its bounding box, so the text hung in the air off the LED
+ * and could not be read at all. This looks for the spot nearest the middle
+ * where the block actually lands on panels, and only falls back to the middle
+ * when no run of panels can hold it.
+ *
+ * Coverage is sampled on a grid across the block: panels are rectangles here
+ * even when the panel is a triangle or a quarter circle, which is close
+ * enough for choosing where to put a caption and much cheaper than the real
+ * silhouette.
+ */
+const infoTextAnchor = (layout: TestPatternLayout, blockW: number, blockH: number): { x: number; y: number } => {
+  const cached = infoAnchorCache.get(layout);
+  if (cached) return cached;
+  const { W, H } = layout;
+  const centre = { x: W / 2, y: H / 2 };
+  const rects = layout.activePanels.map((cell) => dispRectPx(layout, cell));
+  if (!rects.length) return centre;
+  const covers = (x: number, y: number) =>
+    rects.some((r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
+  // Samples across the block, corners included - the corners are what hang off
+  // the end of a row.
+  const STEPS_X = 6;
+  const STEPS_Y = 4;
+  const coverage = (cx: number, cy: number) => {
+    let hits = 0;
+    let total = 0;
+    for (let i = 0; i <= STEPS_X; i += 1) {
+      for (let j = 0; j <= STEPS_Y; j += 1) {
+        const x = cx - blockW / 2 + (blockW * i) / STEPS_X;
+        const y = cy - blockH / 2 + (blockH * j) / STEPS_Y;
+        total += 1;
+        if (covers(x, y)) hits += 1;
+      }
+    }
+    return hits / total;
+  };
+  // Held on the canvas BEFORE being scored, never after: a candidate nudged
+  // back inside the frame afterwards is no longer the position that was
+  // measured, and that is how the block ends up half over a hole again.
+  const onCanvas = (p: { x: number; y: number }) => ({
+    x: Math.min(Math.max(p.x, blockW / 2), Math.max(blockW / 2, W - blockW / 2)),
+    y: Math.min(Math.max(p.y, blockH / 2), Math.max(blockH / 2, H - blockH / 2)),
+  });
+  // The middle first, then panel centres nearest the middle: the text moves as
+  // little as it has to.
+  const candidates = [centre, ...rects
+    .map((r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 }))
+    .sort((a, b) => (a.x - centre.x) ** 2 + (a.y - centre.y) ** 2 - ((b.x - centre.x) ** 2 + (b.y - centre.y) ** 2))]
+    .map(onCanvas);
+  let best = candidates[0];
+  let bestScore = -1;
+  for (const candidate of candidates) {
+    const score = coverage(candidate.x, candidate.y);
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+    if (score >= 1) break;
+  }
+  infoAnchorCache.set(layout, best);
+  return best;
+};
+
+// Wall info text: white, no outline - it is drawn over the panels it names,
+// and a black stroke around every letter read as a smear at a distance, which
+// is the one thing this caption cannot afford.
+const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+  const { W } = layout;
+  const fontPx = Math.max(16, Math.min(40, Math.round(W * 0.016)));
+  const lineH = Math.round(fontPx * 1.4);
+  const lines: string[] = [];
+  if (layout.projectName) lines.push(layout.projectName);
+  if (layout.surfaceName) lines.push(layout.surfaceName);
+  const isContentResScaled = layout.contentPixelH !== layout.H;
+  lines.push(`${isContentResScaled ? "Physical LED Resolution" : "Resolution"}: ${layout.W} x ${layout.H} px`);
+  if (isContentResScaled) lines.push(`Recommended Content Resolution: ${layout.contentPixelW} x ${layout.contentPixelH} px`);
+  lines.push(
+    `Physical Size: ${layout.wallWidthM.toFixed(1)} x ${layout.wallHeightM.toFixed(1)} m`,
+    `Panels: ${layout.totalPanels}`,
+    `Grid: ${layout.activeColsCount} columns x ${layout.activeRowsCount} rows`,
+  );
+  ctx.save();
+  ctx.font = `bold ${fontPx}px Arial`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const blockW = lines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
+  const blockH = lineH * lines.length;
+  const anchor = infoTextAnchor(layout, blockW, blockH);
+  const startY = anchor.y - (lineH * (lines.length - 1)) / 2;
+  ctx.fillStyle = "#ffffff";
+  lines.forEach((line, i) => ctx.fillText(line, anchor.x, startY + i * lineH));
+  ctx.restore();
+};
+
+// Single, thicker white outline around the TRUE outer extremity of the whole
+// assembled LED surface (not per-panel): render every active panel's true
+// (rotated/mirrored) shape as a solid fill into one silhouette - adjacent/
+// touching panels naturally fuse into a single region with no internal seam
+// lines - then peel off one band INSET from that silhouette's own edge
+// (erosion, not dilation: growing the band OUTWARD would put it past the
+// wall's own bounding canvas - since the wall's bbox has zero margin by
+// definition, an outward band is entirely clipped off-canvas and invisible
+// for the common rectangular-wall case). Erosion is implemented as
+// invert -> dilate -> invert (dilation = stamping 8 one-pixel-offset copies,
+// a standard binary-mask dilate), applied ERODE_PX times for a band that
+// thick. Cached per layout (keyed by object identity) since the wall's
+// geometry doesn't change frame to frame.
+const outerOutlineCache = new WeakMap<TestPatternLayout, HTMLCanvasElement>();
+const DILATE_OFFSETS: Array<[number, number]> = [
+  [-1, -1], [0, -1], [1, -1],
+  [-1, 0], [1, 0],
+  [-1, 1], [0, 1], [1, 1],
+];
+const ERODE_PX = 3; // outline thickness, visibly heavier than the 1px panel outlines
+
+// Erosion here is implemented as invert -> dilate -> invert, which only
+// works if there's real "background" around the shape for the inverted
+// region to dilate into. The wall's silhouette always touches its own
+// canvas on every side by definition (the canvas IS the wall's tight
+// bounding box), so with no margin the inverted region is empty right at
+// the edges and erosion silently no-ops there - the outline would be
+// invisible on every straight wall. Working in a padded canvas (the
+// silhouette drawn inset by PAD on all sides) gives the algorithm real
+// background to erode from; the result is cropped back to the true W x H
+// canvas at the end by drawing it at a -PAD offset.
+const OUTLINE_PAD = ERODE_PX + 3;
+
+const buildOuterExtremityOutline = (layout: TestPatternLayout): HTMLCanvasElement => {
+  const cached = outerOutlineCache.get(layout);
+  if (cached) return cached;
+
+  const { W, H } = layout;
+  const PW = W + OUTLINE_PAD * 2;
+  const PH = H + OUTLINE_PAD * 2;
+  const makeCanvas = () => {
+    const c = document.createElement("canvas");
+    c.width = PW;
+    c.height = PH;
+    return c;
+  };
+  const dilateInto = (dstCtx: CanvasRenderingContext2D, src: HTMLCanvasElement) => {
+    dstCtx.clearRect(0, 0, PW, PH);
+    dstCtx.drawImage(src, 0, 0);
+    DILATE_OFFSETS.forEach(([dx, dy]) => dstCtx.drawImage(src, dx, dy));
+  };
+  const subtractInto = (dstCtx: CanvasRenderingContext2D, minuend: HTMLCanvasElement, subtrahend: HTMLCanvasElement) => {
+    dstCtx.clearRect(0, 0, PW, PH);
+    dstCtx.drawImage(minuend, 0, 0);
+    dstCtx.globalCompositeOperation = "destination-out";
+    dstCtx.drawImage(subtrahend, 0, 0);
+    dstCtx.globalCompositeOperation = "source-over";
+  };
+
+  // Silhouette: union of every active panel's true shape, solid white,
+  // offset by PAD so it sits inset from the padded canvas's own edges.
+  const silhouette = makeCanvas();
+  const sCtx = silhouette.getContext("2d")!;
+  sCtx.fillStyle = "#ffffff";
+  layout.activePanels.forEach((cell) => {
+    const r = snapRectPx(dispRectPx(layout, cell));
+    const shape = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape;
+    sCtx.save();
+    applyPanelFrame(sCtx, r.x + OUTLINE_PAD, r.y + OUTLINE_PAD, r.w, r.h, cell.rotation ?? 0, true);
+    tracePanelShapePath(sCtx, r.w, r.h, shape);
+    sCtx.fill();
+    sCtx.restore();
+  });
+
+  const fullWhite = makeCanvas();
+  const fCtx = fullWhite.getContext("2d")!;
+  fCtx.fillStyle = "#ffffff";
+  fCtx.fillRect(0, 0, PW, PH);
+
+  const scratchA = makeCanvas();
+  const scratchB = makeCanvas();
+  const aCtx = scratchA.getContext("2d")!;
+  const bCtx = scratchB.getContext("2d")!;
+  // erode(src) -> dst = fullWhite - dilate(fullWhite - src), using A/B as scratch.
+  const erodeInto = (dstCtx: CanvasRenderingContext2D, src: HTMLCanvasElement) => {
+    subtractInto(aCtx, fullWhite, src); // A = invert(src)
+    dilateInto(bCtx, scratchA); // B = dilate(A)
+    subtractInto(dstCtx, fullWhite, scratchB); // dst = fullWhite - B
+  };
+
+  // Erode repeatedly to reach the full band thickness.
+  const eroded = makeCanvas();
+  erodeInto(eroded.getContext("2d")!, silhouette);
+  let current = eroded;
+  for (let i = 1; i < ERODE_PX; i += 1) {
+    const next = makeCanvas();
+    erodeInto(next.getContext("2d")!, current);
+    current = next;
+  }
+
+  const bandPadded = makeCanvas();
+  const bandCtx = bandPadded.getContext("2d")!;
+  subtractInto(bandCtx, silhouette, current); // silhouette minus the fully-eroded core = the outline band
+
+  // Crop back to the true wall resolution.
+  const out = document.createElement("canvas");
+  out.width = W;
+  out.height = H;
+  out.getContext("2d")!.drawImage(bandPadded, -OUTLINE_PAD, -OUTLINE_PAD);
+
+  outerOutlineCache.set(layout, out);
+  return out;
+};
+
+// Direction arrow icon (vector line + filled triangular head) for the
+// per-panel row/column labels, replacing the old Unicode "↓"/"→" glyph
+// characters. A font glyph's internal strokes are only ever as thick as the
+// font renderer draws them - at small panel sizes (or when the output canvas
+// is later scaled for display/video) that can render at sub-pixel width and
+// disappear. Drawing the shaft with an explicit ctx.lineWidth (floored so it
+// never rounds below a visible thickness) guarantees it stays visible at any
+// output resolution, and the arrowhead is sized directly off that same line
+// width so it always scales with it. (x, y) is the icon's top-left corner;
+// `size` is its bounding box side length.
+const drawDirectionArrow = (ctx: CanvasRenderingContext2D, x: number, y: number, size: number, direction: "down" | "right") => {
+  const lineWidth = Math.min(3.5, Math.max(1.5, size * 0.16));
+  const headLen = Math.max(lineWidth * 1.8, size * 0.42);
+  const headWidth = headLen * 0.9;
+  ctx.save();
+  ctx.strokeStyle = "#ffffff";
+  ctx.fillStyle = "#ffffff";
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (direction === "down") {
+    const cx = x + size / 2;
+    const yTop = y + lineWidth / 2;
+    const yTip = y + size - lineWidth / 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, yTop);
+    ctx.lineTo(cx, yTip - headLen * 0.6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx, yTip);
+    ctx.lineTo(cx - headWidth / 2, yTip - headLen);
+    ctx.lineTo(cx + headWidth / 2, yTip - headLen);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    const cy = y + size / 2;
+    const xLeft = x + lineWidth / 2;
+    const xTip = x + size - lineWidth / 2;
+    ctx.beginPath();
+    ctx.moveTo(xLeft, cy);
+    ctx.lineTo(xTip - headLen * 0.6, cy);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(xTip, cy);
+    ctx.lineTo(xTip - headLen, cy - headWidth / 2);
+    ctx.lineTo(xTip - headLen, cy + headWidth / 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+};
+
+// Corner-to-corner alignment cross + a centre circle as tall as the wall -
+// classic geometry/alignment references for spotting warped, offset or
+// stretched panels across the whole assembled surface.
+export const drawAlignmentOverlay = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+  const { W, H } = layout;
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+  ctx.lineWidth = Math.max(2, Math.round(Math.min(W, H) * 0.0035));
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(W, H);
+  ctx.moveTo(W, 0);
+  ctx.lineTo(0, H);
+  ctx.stroke();
+  ctx.beginPath();
+  // A true circle in NATIVE space would render as an ellipse once the
+  // caller's vertical scale(1, contentPixelH/H) stretches it into the
+  // Recommended Content Resolution canvas (a no-op for non-MT walls, where
+  // contentPixelH === H) - unlike most of this pattern, an alignment
+  // reference shape's whole purpose is to look geometrically correct in
+  // that actual generated image (so a human or camera can trust it as a
+  // "true circle" reference), not to represent physical panel geometry that
+  // should stretch along with everything else. Pre-shrinking the vertical
+  // radius by the same factor here cancels the stretch out, same technique
+  // as drawBouncingLogo's aspect-ratio compensation.
+  const contentScaleY = H > 0 ? layout.contentPixelH / H : 1;
+  ctx.ellipse(W / 2, H / 2, H / 2, H / 2 / contentScaleY, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+};
+
+// 1D "DVD screensaver" ping-pong: reflects a constantly-increasing position
+// back and forth across [0, range] with no stored state - the whole
+// trajectory is a pure function of elapsed time, so it can be called from
+// any frame without tracking velocity/position between calls.
+const bounce1D = (t: number, speed: number, range: number): number => {
+  if (range <= 0) return 0;
+  const period = range * 2;
+  let x = (t * speed) % period;
+  if (x < 0) x += period;
+  return x <= range ? x : period - x;
+};
+
+/**
+ * Draws a small logo bouncing around the canvas, DVD-screensaver style.
+ * Deliberately NOT called from drawTestPatternFrame (or anywhere in the
+ * recorder/export paths) - this is decoration for the live browser tab only,
+ * never the recorded video or the static PNG/PDF exports.
+ */
+export const drawBouncingLogo = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout, timeSeconds: number, image: HTMLImageElement) => {
+  const { W, H } = layout;
+  if (W <= 0 || H <= 0 || !image.naturalWidth || !image.naturalHeight) return;
+  // ~1/2 of a standard panel's native pixel width (2x the original 1/4), aspect ratio preserved.
+  const logoW = Math.max(4, layout.tileWidthPx / 2);
+  // Drawn in native W x H coordinate space, like everything else here - the
+  // live view's caller applies a vertical scale(1, contentPixelH/H) on top
+  // (a no-op for non-MT walls) to reach the Recommended Content Resolution.
+  // Unlike the rest of the pattern, this logo is browser-preview decoration
+  // only (never exported/recorded, so never later squeezed back down by real
+  // MT receiving hardware) - so for an MT wall that ambient stretch would
+  // otherwise leave it rendered twice as tall as its real shape, with
+  // nothing downstream to cancel it out. Dividing by the same factor here
+  // keeps it showing at its correct, undistorted aspect ratio regardless of
+  // panel type.
+  const contentScaleY = H > 0 ? layout.contentPixelH / H : 1;
+  const logoH = (logoW * (image.naturalHeight / image.naturalWidth)) / contentScaleY;
+  const rangeX = Math.max(0, W - logoW);
+  const rangeY = Math.max(0, H - logoH);
+  // Full one-way traverse takes several seconds on each axis (slow/subtle),
+  // and the two periods share no common factor, so the path doesn't retrace
+  // a short, obviously-repeating loop. /18 and /14 are double the original
+  // /9 and /7 divisors - half the speed, same non-repeating ratio.
+  const x = bounce1D(timeSeconds, rangeX / 18, rangeX);
+  const y = bounce1D(timeSeconds, rangeY / 14, rangeY);
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(image, x, y, logoW, logoH);
+  ctx.restore();
+};
+
+/**
+ * Draw one animation frame. `timeSeconds` should be pre-wrapped or raw - the
+ * function mods it by LOOP_SECONDS internally, so callers can pass either a
+ * free-running elapsed time (live view) or a deterministic frame*interval
+ * value (recorder), and both loop identically.
+ */
+export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout, timeSeconds: number) => {
+  const { W, H } = layout;
+  if (W <= 0 || H <= 0) return;
+  // The caller's transform when this function was entered - identity for a
+  // non-MT wall (canvas backing store == layout.W x layout.H 1:1 in every
+  // caller: live view, WebM/MP4 recorder, PNG export), or
+  // `scale(1, contentPixelH / H)` for an all-MT wall, applied by every caller
+  // before invoking this function so the canvas backing store == layout's
+  // Recommended Content Resolution (contentPixelW x contentPixelH) instead.
+  // This function never applies that scale itself - it stays entirely in
+  // native W x H coordinate space and simply inherits whatever the caller's
+  // transform already is, so the RGB/checkerboard/greyscale pattern, panel
+  // outlines, numbering, outer outline and alignment overlay all scale
+  // uniformly with zero special-casing - MT's content-resolution doubling is
+  // implemented ENTIRELY by what transform each caller sets up beforehand.
+  // The per-panel loop below has to reset to THIS base transform (not a
+  // hardcoded identity) before drawing the pre-rendered world-space pattern
+  // layer, or that layer gets drawn at 1 source px = 1 physical px instead of
+  // 1 source px = 1 logical unit - which is exactly what made the RGB tiles
+  // stop lining up with panel boundaries once the live view started
+  // rendering at more than 1 physical pixel per unit.
+  const baseTransform = ctx.getTransform();
+  ctx.imageSmoothingEnabled = false;
+
+  const rgbTile = getRgbTile(layout.tileWidthPx, layout.tileHeightPx);
+  const rgbPeriodPx = layout.tileWidthPx * 3;
+
+  // Background.
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, W, H);
+
+  // One pattern layer per surface, each in its OWN local space and on its own
+  // phase, so every sub-screen runs an independent test pattern rather than
+  // all of them showing one slice of a single wall-wide animation. A wall
+  // with no sub-screens has exactly one surface covering everything, which
+  // reduces this back to the original single-layer behaviour.
+  const surfaces = layout.surfaces;
+  surfaces.forEach((surface, surfaceIndex) => {
+  const bb = surface.bbox;
+  const lw = Math.max(1, Math.round(bb.w));
+  const lh = Math.max(1, Math.round(bb.h));
+  // Grey period = this surface's own diagonal, so exactly one bright band
+  // sweeps corner-to-corner across it at a time (not several small repeats),
+  // scaled to the surface's actual size.
+  const greyPeriod = Math.max(1, Math.round(Math.hypot(lw, lh)));
+  const greyTile = getGreyTile(greyPeriod);
+
+  // Stagger each surface a fixed fraction of a loop apart: they animate
+  // independently of one another, yet the whole set still returns to its
+  // exact starting state at LOOP_SECONDS, so a recorded video still loops
+  // seamlessly.
+  const phaseOffset = surfaces.length > 1 ? (surfaceIndex / surfaces.length) * LOOP_SECONDS : 0;
+  const phase = (((timeSeconds + phaseOffset) % LOOP_SECONDS) + LOOP_SECONDS) % LOOP_SECONDS;
+  const progress = phase / LOOP_SECONDS;
+  const rgbSlidePx = progress * rgbPeriodPx;
+  const greySlidePx = progress * greyPeriod;
+
+  // Build this surface's pattern layer once per frame (a few full-surface
+  // draws, O(1) regardless of panel count), then reveal it through each
+  // panel's clip.
+  const layerCanvas = getPatternLayer(surface.id, lw, lh);
+  const layerCtx = layerCanvas.getContext("2d")!;
+  layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+  layerCtx.clearRect(0, 0, lw, lh);
+  // Nearest-neighbour sampling: at a fractional slide offset, a smoothed
+  // pattern would blend adjacent red/green/blue tile pixels into a soft
+  // rainbow seam. Each panel must show a SOLID colour with a hard boundary
+  // as the slide reveals the next one, never a blended gradient.
+  layerCtx.imageSmoothingEnabled = false;
+
+  const rgbPattern = layerCtx.createPattern(rgbTile, "repeat")!;
+  rgbPattern.setTransform(new DOMMatrix().translate(rgbSlidePx, 0));
+  layerCtx.fillStyle = rgbPattern;
+  layerCtx.fillRect(0, 0, lw, lh);
+
+  layerCtx.save();
+  // 'multiply' (not 'overlay'): overlay is a no-op on pure 0/255 channel
+  // values, so it would never visibly affect these solid R/G/B panels.
+  // Multiply scales the panel's existing channel toward the tile's floor and
+  // leaves zero channels at zero, so brightness visibly sweeps across each
+  // panel without ever introducing a new hue.
+  layerCtx.globalCompositeOperation = "multiply";
+  const greyPattern = layerCtx.createPattern(greyTile, "repeat")!;
+  greyPattern.setTransform(new DOMMatrix().translate(greySlidePx, greySlidePx));
+  layerCtx.fillStyle = greyPattern;
+  layerCtx.fillRect(0, 0, lw, lh);
+  layerCtx.restore();
+
+  surface.cells.forEach((cell) => {
+    // Snap to the integer pixel grid so a 1px stroke lands crisply on one
+    // pixel row/column (not straddling two, which anti-aliases into a soft
+    // >1px-looking line), and so neighbouring panels' rounded edges agree
+    // with each other rather than drifting apart.
+    const r = snapRectPx(dispRectPx(layout, cell));
+    const shape = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape;
+    const rotation = cell.rotation ?? 0;
+
+    // Pattern fill: clip to the panel's true (rotated/mirrored) silhouette,
+    // then draw the SAME world-space layer with the transform reset to
+    // identity - so a rotated/shaped panel reveals the correct slice of the
+    // global pattern instead of a rotated copy of it.
+    ctx.save();
+    applyPanelFrame(ctx, r.x, r.y, r.w, r.h, rotation, true);
+    tracePanelShapePath(ctx, r.w, r.h, shape);
+    ctx.clip();
+    ctx.setTransform(baseTransform);
+    ctx.drawImage(layerCanvas, bb.x, bb.y);
+    ctx.restore();
+
+    // 1px white outline, following the true shape. Rect/corner panels are
+    // axis-aligned at every supported rotation (0/90/180/270 just swap the
+    // already-baked w/h) and mirror-symmetric, so draw a plain strokeRect
+    // offset by 0.5px - the standard crisp-1px-line trick - instead of
+    // going through the rotate/mirror path, which can leave the line
+    // sitting across a pixel boundary. Triangle/curve panels keep the true
+    // traced path; their straight legs still land on this same snapped
+    // rect, only the hypotenuse/arc is inherently anti-aliased.
+    ctx.save();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1;
+    if (shape === "rect" || shape === "corner") {
+      ctx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(0, r.w - 1), Math.max(0, r.h - 1));
+    } else {
+      applyPanelFrame(ctx, r.x, r.y, r.w, r.h, rotation, true);
+      tracePanelShapePath(ctx, r.w, r.h, shape);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Location label: two lines (row then column), always axis-aligned, white
+    // and upright regardless of the panel's own rotation. Each line is a
+    // vector direction-arrow icon followed by the row/column number.
+    //
+    // A rectangular panel keeps it in the top-left corner, where it has
+    // always been. A TRIANGLE or QUARTER CIRCLE does not: that corner is the
+    // thin tip of the shape, or outside it altogether, so the label sat half
+    // off the panel and was cut away with it. Those are anchored on the
+    // shape's own centre of area instead, mapped through the panel's rotation
+    // and the front-view mirror so it follows the shape whichever way round
+    // the panel is, with the block centred on it - which keeps the whole
+    // label on the lit part of the panel at every rotation.
+    const shaped = panelShapeNeedsInsetLabel(shape);
+    const pad = Math.max(3, Math.round(Math.min(r.w, r.h) * 0.06));
+    const rowText = layout.rowLabel(cell);
+    const colText = layout.colLabel(cell);
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    // Legibility is measured in PIXELS, not in fractions of a panel. Taking
+    // the size from the short side made an MT panel - 256 x 64 - carry 6px
+    // text, unreadable on the wall it was made for, while the 256px of width
+    // beside it went unused. So: a floor of LABEL_MIN_PX, then whatever the
+    // panel is big enough for, capped at what the two-line block can fit.
+    const LABEL_MIN_PX = 18;
+    let fontPx = Math.max(
+      6,
+      Math.floor(Math.min(Math.max(Math.min(r.w, r.h) * 0.08, LABEL_MIN_PX), r.h / 2.6, r.w / 4)),
+    );
+    const blockWidth = () => {
+      ctx.font = `bold ${fontPx}px Arial`;
+      const gap = Math.max(2, Math.round(fontPx * 0.25));
+      return fontPx + gap + Math.max(ctx.measureText(rowText).width, ctx.measureText(colText).width);
+    };
+    let width = blockWidth();
+    if (shaped) {
+      // Only about half the width of a shaped panel is solid where the label
+      // sits, so a long reference ("12 & 13") is shrunk to fit rather than
+      // hung over the edge.
+      const budget = Math.min(r.w, r.h) * 0.46;
+      if (width > budget) {
+        fontPx = Math.max(6, Math.floor((fontPx * budget) / width));
+        width = blockWidth();
+      }
+    }
+    const lineH = Math.round(fontPx * 1.15);
+    const iconSize = fontPx;
+    const gap = Math.max(2, Math.round(fontPx * 0.25));
+    let blockX = r.x + pad;
+    let blockY = r.y + pad;
+    if (shaped) {
+      const local = panelShapeLabelPoint(shape, r.w, r.h);
+      const anchor = panelFramePoint(r, rotation, true, local.x, local.y);
+      blockX = anchor.x - width / 2;
+      blockY = anchor.y - lineH;
+    }
+    const textX = blockX + iconSize + gap;
+    drawDirectionArrow(ctx, blockX, blockY, iconSize, "down");
+    ctx.fillText(rowText, textX, blockY);
+    drawDirectionArrow(ctx, blockX, blockY + lineH, iconSize, "right");
+    ctx.fillText(colText, textX, blockY + lineH);
+  });
+  });
+
+  ctx.drawImage(buildOuterExtremityOutline(layout), 0, 0);
+  drawSurfaceBoundaries(ctx, layout);
+  drawAlignmentOverlay(ctx, layout);
+  drawInfoText(ctx, layout);
+  // Last, so nothing is drawn over an obstruction - it is opaque precisely
+  // because the LED behind it cannot be seen.
+  drawObstructions(ctx, layout.obstructions, {
+    wallBBoxMm: layout.wallBBox,
+    W: layout.W,
+    H: layout.H,
+    // The pattern is always rendered front view (see dispRectPx).
+    mirror: true,
+    layoutBBoxMm: layout.obstructionLayoutBBox,
+  });
+};
+
+// Each sub-screen's own boundary and name, in its own colour. Drawn when the
+// wall has more than one surface, and ALSO when it has exactly one that is a
+// declared sub-screen - rendering a single screen on its own is where its name
+// matters most, since the shape no longer tells you which screen it is, and
+// the name was previously only in the small info block. A plain wall with no
+// sub-screens still has nothing drawn over it, exactly as before.
+// Inset by the stroke width so the line lands ON the outermost panels (the
+// wall canvas is the wall's tight bounding box, so anything drawn outside a
+// surface at the wall edge would be clipped away).
+export const drawSurfaceBoundaries = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+  const named = layout.surfaces.filter((surface) => surface.isSubScreen);
+  if (layout.surfaces.length < 2 && !named.length) return;
+  const { W, H } = layout;
+  const stroke = Math.max(2, Math.round(Math.min(W, H) * 0.004));
+  const fontPx = Math.max(12, Math.round(Math.min(W, H) * 0.022));
+  ctx.save();
+  ctx.lineWidth = stroke;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.lineJoin = "round";
+  layout.surfaces.forEach((surface) => {
+    if (surface.bbox.w <= 0 || surface.bbox.h <= 0) return;
+    const color = surface.color ?? "#ffffff";
+    const inset = stroke / 2;
+    ctx.strokeStyle = color;
+    ctx.strokeRect(surface.bbox.x + inset, surface.bbox.y + inset, surface.bbox.w - stroke, surface.bbox.h - stroke);
+    if (!surface.name) return;
+    const label = surface.name.toUpperCase();
+    ctx.font = `bold ${fontPx}px Arial`;
+    const padPx = Math.round(fontPx * 0.35);
+    const boxW = ctx.measureText(label).width + padPx * 2;
+    ctx.fillStyle = color;
+    ctx.fillRect(surface.bbox.x + stroke, surface.bbox.y + stroke, boxW, fontPx + padPx * 2);
+    ctx.fillStyle = "#020617";
+    ctx.fillText(label, surface.bbox.x + stroke + padPx, surface.bbox.y + stroke + padPx);
+  });
+  ctx.restore();
+};

@@ -1,0 +1,149 @@
+// Pure helpers for the Output Canvas Positioning feature. Deliberately kept
+// separate from the mm-based physical layout: everything here only READS
+// panel mm positions to derive a non-persisted canvas-pixel offset, it never
+// writes back into panel x/y. Physical layout and canvas position are, and
+// must stay, two separate coordinate systems (see App.tsx SubScreen/Cell
+// comments).
+import { type RectMm, activeBBox, bandPanels } from "../model/panels";
+import { type Cell, PANEL_TYPES, cellPanelType, cellRect } from "../App";
+
+export type CanvasResolution = { w: number; h: number };
+
+/**
+ * Pixel resolution of an already-filtered panel list, using the same
+ * per-band pixel-summation algorithm as the whole-layout wallPixels
+ * calculation in App.tsx (width = widest band's pixels, height = sum of each
+ * band's tallest panel) - reused rather than reinvented so the two stay
+ * consistent for mixed MG9/MT layouts.
+ */
+export const resolutionOf = (panels: Cell[]): CanvasResolution => {
+  const active = panels.filter((cell) => !cell.isRemoved);
+  const bands = bandPanels(active, cellRect) as Cell[][];
+  let pixelW = 0;
+  let pixelH = 0;
+  bands.forEach((band) => {
+    let rowPixelW = 0;
+    let rowPixelH = 0;
+    band.forEach((cell) => {
+      const p = PANEL_TYPES[cellPanelType(cell)];
+      rowPixelW += p.pixW;
+      rowPixelH = Math.max(rowPixelH, p.pixH);
+    });
+    pixelW = Math.max(pixelW, rowPixelW);
+    pixelH += rowPixelH;
+  });
+  return { w: pixelW, h: pixelH };
+};
+
+/**
+ * The pixel FOOTPRINT a panel set occupies: its physical bounding box in mm,
+ * converted with the finest pixel pitch on the wall.
+ *
+ * Deliberately NOT resolutionOf above. That one packs each row's panels
+ * together, which is right for the NovaStar cabinet topology (a processor has
+ * no such thing as an empty gap pixel) but under-reports the wall itself the
+ * moment the layout stops being a full rectangle: a stepped 18.5m wall whose
+ * longest row holds 35 panels reads 5,880px wide there, when the content
+ * mapped onto it has to span all 37 module columns - 6,216px. This is the
+ * figure the wall's own Resolution, aspect ratio and content size are quoted
+ * from, and for any rectangular wall the two agree exactly.
+ */
+export const wallFootprintResolutionOf = (panels: Cell[]): CanvasResolution => {
+  const active = panels.filter((cell) => !cell.isRemoved);
+  if (!active.length) return { w: 0, h: 0 };
+  const bbox = activeBBox(active.map(cellRect));
+  let pxPerMmX = 0;
+  let pxPerMmY = 0;
+  active.forEach((cell) => {
+    const spec = PANEL_TYPES[cellPanelType(cell)];
+    const rect = cellRect(cell);
+    // cellRect already swapped the panel's mm footprint for a quarter turn, so
+    // its pixel grid has to swap with it.
+    const turned = Math.abs(rect.w - spec.w * 1000) > 1;
+    const pixW = turned ? spec.pixH : spec.pixW;
+    const pixH = turned ? spec.pixW : spec.pixH;
+    if (rect.w > 0) pxPerMmX = Math.max(pxPerMmX, pixW / rect.w);
+    if (rect.h > 0) pxPerMmY = Math.max(pxPerMmY, pixH / rect.h);
+  });
+  return { w: Math.round(bbox.w * pxPerMmX), h: Math.round(bbox.h * pxPerMmY) };
+};
+
+/**
+ * A sub-screen's own pixel resolution: the FOOTPRINT its panels stand in, for
+ * exactly the reasons given above - a sub-screen is a wall in its own right,
+ * and the content mapped onto it has to span the whole rectangle.
+ *
+ * This used to be resolutionOf, the packed space, which lost a module column
+ * per gap: a 22-column sub-screen with a hole in each row was quoted as
+ * 3,528px wide on the Output Canvas and in the PDF, while the test pattern
+ * rendered the 3,696px the content really is. The packed figure is still the
+ * right one for the NovaStar cabinet topology - that is a different question,
+ * asked by exportBuilder, which goes to resolutionOf directly.
+ *
+ * It is also the only figure consistent with finalCanvasPositionOf, which
+ * places each panel on the canvas by its PHYSICAL mm offset within the
+ * sub-screen: with the packed figure, a sub-screen's own panels could sit
+ * outside the rectangle the canvas view drew around them.
+ */
+export const subScreenResolutionOf = (panels: Cell[], subScreenId: string): CanvasResolution =>
+  wallFootprintResolutionOf(panels.filter((cell) => cell.subScreenId === subScreenId));
+
+/**
+ * Each panel's tightly-packed pixel position within the wall's own native
+ * resolution (see resolutionOf above - same per-band packing algorithm,
+ * returning per-panel positions instead of just the aggregate W/H).
+ *
+ * This is the coordinate space a NovaStar processor's own LED-screen canvas
+ * uses for cabinet topology - confirmed by comparing generated exports
+ * against real NovaStar-software-generated project files: the processor's
+ * pixel-addressing canvas is sized and positioned purely from real (patched)
+ * panel pixels, with no such thing as an "empty gap pixel" for a
+ * missing/unpatched panel, and is entirely independent of the output-canvas/
+ * sub-screen placement used for on-screen positioning elsewhere in this app.
+ * Deliberately NOT the same function as the test pattern's own panel
+ * placement (drawTestPattern.ts), which intentionally preserves physical
+ * gaps as empty space for a technician's visual reference - both are
+ * correct, for two different purposes.
+ */
+export const wallNativePositionsOf = (panels: Cell[]): Map<string, RectMm> => {
+  const active = panels.filter((cell) => !cell.isRemoved);
+  const bands = bandPanels(active, cellRect) as Cell[][];
+  const positions = new Map<string, RectMm>();
+  let bandY = 0;
+  bands.forEach((band) => {
+    let x = 0;
+    let bandH = 0;
+    band.forEach((cell) => {
+      const spec = PANEL_TYPES[cellPanelType(cell)];
+      positions.set(cell.id, { x, y: bandY, w: spec.pixW, h: spec.pixH });
+      x += spec.pixW;
+      bandH = Math.max(bandH, spec.pixH);
+    });
+    bandY += bandH;
+  });
+  return positions;
+};
+
+/**
+ * A panel's final position on the output canvas: the sub-screen's own canvas
+ * X/Y plus the panel's position within the sub-screen, converted from mm to
+ * canvas pixels using THAT PANEL'S OWN native mm->px ratio (MG9 and MT have
+ * different pitches, so a single blended sub-screen-wide ratio would be
+ * wrong) - the same ratio the front-view PNG export already uses.
+ */
+export const finalCanvasPositionOf = (
+  cell: Cell,
+  subScreenBBox: RectMm,
+  canvasX: number,
+  canvasY: number,
+): { x: number; y: number } => {
+  const rect = cellRect(cell);
+  const spec = PANEL_TYPES[cellPanelType(cell)];
+  const pxPerMm = spec.pixW / (spec.w * 1000);
+  const localOffsetXMm = rect.x - subScreenBBox.x;
+  const localOffsetYMm = rect.y - subScreenBBox.y;
+  return {
+    x: canvasX + Math.round(localOffsetXMm * pxPerMm),
+    y: canvasY + Math.round(localOffsetYMm * pxPerMm),
+  };
+};
