@@ -351,7 +351,7 @@ export class LogoFx {
         ctx.fillStyle = BRAND_COLOURS[bands.strip[i]];
         ctx.fillRect(-2, (i - bands.offset) * bh - 0.5, LOGO_VIEW_W + 4, bh + 1);
       }
-    } else if (bands) {
+    } else if (bands && "solid" in bands) {
       ctx.fillStyle = bands.solid;
       ctx.fill(path);
     } else {
