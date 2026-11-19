@@ -4,11 +4,13 @@
 // * The wordmark is drawn as vector paths (the approved primary logo), so it
 //   stays sharp at any output resolution and can be filled with any colour.
 // * It starts in a random brand colour. Each time it bounces off an edge it
-//   splits into five full copies, one per brand colour, fanned out along the
-//   direction it is now travelling. The copies keep moving along the bounce
-//   path, spread apart, then glide back together into a single logo in a NEW
-//   random brand colour - never the one it had before the bounce.
-// * Hitting a corner does the same split (a little bigger), changes the colour
+//   runs briefly through the brand colour bands (the stacked purple / blue /
+//   deep red / yellow / red look from the brand reference), then settles on a
+//   NEW random brand colour - never the one it had before the bounce.
+// * Hitting a corner instead splits the logo into five full copies, one per
+//   brand colour, fanned out along the direction it is now travelling. They
+//   keep moving along the bounce path, spread apart, then glide back together
+//   into a single logo in a new random brand colour. It changes the colour
 //   once, sets off a brand-colour firework show, and fires one quick glitch
 //   (shake + RGB split) over that whole screen - see `glitchAt` / glitch.ts.
 //
@@ -80,7 +82,7 @@ const hash01 = (n: number) => {
 
 // --- per-screen state -----------------------------------------------------------
 
-const BOUNCE_SECONDS = 1.1;
+const BOUNCE_SECONDS = 1.0;
 const CORNER_SECONDS = 1.6;
 const GLITCH_SECONDS = 0.6;
 /** Gap between neighbouring copies at full spread, as a fraction of the logo width. */
@@ -102,6 +104,8 @@ export class LogoFx {
   private tStart = -Infinity;
   private tDur = BOUNCE_SECONDS;
   private spread = 1;
+  /** True for a corner hit (split copies); false for an edge hit (colour bands). */
+  private split = false;
   /** Unit vector of the logo's travel direction just after the latest bounce. */
   private dirX = 1;
   private dirY = 0;
@@ -178,6 +182,7 @@ export class LogoFx {
     this.colour = nextColour(this.colour, this.rand);
     this.tStart = t;
     this.spread = big ? 1.35 : 1;
+    this.split = big;
     this.tDur = big ? CORNER_SECONDS : BOUNCE_SECONDS;
   }
 
@@ -296,6 +301,20 @@ export class LogoFx {
     };
   }
 
+  /** Edge hit: the logo as a strip of colour bands scrolling from the old colour to the new one. */
+  private bandsAt(t: number): { solid: string } | { strip: number[]; offset: number } {
+    const p = (t - this.tStart) / this.tDur;
+    if (p >= 1) return { solid: BRAND_COLOURS[this.colour] };
+    const n = BRAND_COLOURS.length;
+    const strip: number[] = [];
+    for (let i = 0; i < n; i++) strip.push(this.from);
+    for (let i = 0; i < n; i++) strip.push(i);
+    for (let i = 0; i < n; i++) strip.push(this.colour);
+    // Ease in and out so the stacked brand bands are on screen for a beat.
+    const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+    return { strip, offset: e * (strip.length - n) };
+  }
+
   /** Copies of the logo for time t: offsets along the travel direction, back to front. */
   private copiesAt(t: number): { colour: number; dx: number; dy: number }[] {
     const p = (t - this.tStart) / this.tDur;
@@ -322,12 +341,27 @@ export class LogoFx {
     ctx.scale(grow, grow);
     ctx.translate(-this.w / 2, -this.h / 2);
     ctx.scale(this.w / LOGO_VIEW_W, this.h / LOGO_VIEW_H);
-    for (const c of this.copiesAt(t)) {
-      ctx.save();
-      ctx.translate(c.dx * (LOGO_VIEW_W / this.w), c.dy * (LOGO_VIEW_W / this.w));
-      ctx.fillStyle = BRAND_COLOURS[c.colour];
+    const bands = this.split ? null : this.bandsAt(t);
+    if (bands && "strip" in bands) {
+      ctx.clip(path);
+      const n = BRAND_COLOURS.length;
+      const bh = LOGO_VIEW_H / n;
+      const first = Math.max(0, Math.floor(bands.offset));
+      for (let i = first; i < Math.min(bands.strip.length, first + n + 2); i++) {
+        ctx.fillStyle = BRAND_COLOURS[bands.strip[i]];
+        ctx.fillRect(-2, (i - bands.offset) * bh - 0.5, LOGO_VIEW_W + 4, bh + 1);
+      }
+    } else if (bands) {
+      ctx.fillStyle = bands.solid;
       ctx.fill(path);
-      ctx.restore();
+    } else {
+      for (const c of this.copiesAt(t)) {
+        ctx.save();
+        ctx.translate(c.dx * (LOGO_VIEW_W / this.w), c.dy * (LOGO_VIEW_W / this.w));
+        ctx.fillStyle = BRAND_COLOURS[c.colour];
+        ctx.fill(path);
+        ctx.restore();
+      }
     }
     ctx.restore();
     if (this.celebrating) this.drawFireworks(ctx, t);
