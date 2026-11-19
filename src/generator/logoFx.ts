@@ -4,11 +4,13 @@
 // * The wordmark is drawn as vector paths (the approved primary logo), so it
 //   stays sharp at any output resolution and can be filled with any colour.
 // * It starts in a random brand colour. Each time it bounces off an edge it
-//   runs briefly through the brand colour bands (the stacked purple / blue /
-//   deep red / yellow / red look from the brand reference), then settles on a
-//   NEW random brand colour - never the one it had before the bounce.
-// * Hitting a corner changes the colour once, with a longer run through the
-//   bands, and sets off a brand-colour firework show across the screen.
+//   splits into five full copies, one per brand colour, fanned out along the
+//   direction it is now travelling. The copies keep moving along the bounce
+//   path, spread apart, then glide back together into a single logo in a NEW
+//   random brand colour - never the one it had before the bounce.
+// * Hitting a corner does the same split (a little bigger), changes the colour
+//   once, sets off a brand-colour firework show, and fires one quick glitch
+//   (shake + RGB split) over that whole screen - see `glitchAt` / glitch.ts.
 //
 // Position is a pure function of wall-clock time (as before), so the logo
 // keeps moving while the pattern is paused. Everything else (colour, effects)
@@ -61,10 +63,29 @@ const pickColour = (rand: () => number) => {
   return bag[Math.floor(rand() * bag.length)];
 };
 
+export type Glitch = {
+  amount: number;
+  shakeX: number;
+  shakeY: number;
+  red: { x: number; y: number };
+  green: { x: number; y: number };
+  blue: { x: number; y: number };
+};
+
+/** Cheap deterministic noise in [0, 1). */
+const hash01 = (n: number) => {
+  const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+  return x - Math.floor(x);
+};
+
 // --- per-screen state -----------------------------------------------------------
 
-const BOUNCE_SECONDS = 1.0;
-const CORNER_SECONDS = 1.9;
+const BOUNCE_SECONDS = 1.1;
+const CORNER_SECONDS = 1.6;
+const GLITCH_SECONDS = 0.6;
+/** Gap between neighbouring copies at full spread, as a fraction of the logo width. */
+const SPLIT_STEP = 0.2;
+const smooth = (x: number) => x * x * (3 - 2 * x);
 /** If the page stalls longer than this between frames, resync instead of replaying events. */
 const MAX_STEP = 0.5;
 
@@ -80,7 +101,11 @@ export class LogoFx {
   private from = 0;
   private tStart = -Infinity;
   private tDur = BOUNCE_SECONDS;
-  private laps = 1;
+  private spread = 1;
+  /** Unit vector of the logo's travel direction just after the latest bounce. */
+  private dirX = 1;
+  private dirY = 0;
+  private glitchStart = -Infinity;
   private last: { t: number; cx: number; cy: number } | null = null;
   private areaW = 0;
   private areaH = 0;
@@ -117,6 +142,10 @@ export class LogoFx {
     const ay = bounceAxis((t + seed * 2.3) * Math.max(20, ry / 7), ry);
     this.x = ax.pos;
     this.y = ay.pos;
+    // Which way each axis is travelling now (+1 while the position is rising).
+    const fwd = (u: number, range: number) => (range > 0 && (((u % (range * 2)) + range * 2) % (range * 2)) < range ? 1 : -1);
+    const vx = fwd((t + seed * 3.7) * Math.max(20, rx / 9), rx) * Math.max(20, rx / 9);
+    const vy = fwd((t + seed * 2.3) * Math.max(20, ry / 7), ry) * Math.max(20, ry / 7);
 
     const prev = this.last;
     this.last = { t, cx: ax.count, cy: ay.count };
@@ -134,6 +163,10 @@ export class LogoFx {
       const near = (v: number, range: number) => Math.min(v, range - v) <= tol;
       const corner = (hitX && hitY) || (hitX && near(ay.pos, ry)) || (hitY && near(ax.pos, rx));
       this.bounces += 1;
+      // The split fans out along the direction the logo leaves in.
+      const len = Math.hypot(vx, vy) || 1;
+      this.dirX = vx / len;
+      this.dirY = vy / len;
       if (corner) this.onCorner(t);
       else this.recolour(t, false);
     }
@@ -144,7 +177,7 @@ export class LogoFx {
     this.from = this.colour;
     this.colour = nextColour(this.colour, this.rand);
     this.tStart = t;
-    this.laps = big ? 3 : 1;
+    this.spread = big ? 1.35 : 1;
     this.tDur = big ? CORNER_SECONDS : BOUNCE_SECONDS;
   }
 
@@ -152,6 +185,7 @@ export class LogoFx {
     this.corners += 1;
     this.recolour(t, true);
     this.cornerAt = t;
+    this.glitchStart = t;
     const left = this.x + this.w / 2 < this.areaW / 2;
     const top = this.y + this.h / 2 < this.areaH / 2;
     const cx = left ? 0 : this.areaW;
@@ -238,18 +272,42 @@ export class LogoFx {
     return this.sparks.length > 0 || this.rockets.length > 0 || this.shock !== null;
   }
 
-  /** The colours the logo shows right now, as a band strip (top to bottom). */
-  private fillAt(t: number): { solid: string } | { strip: number[]; offset: number } {
+  /**
+   * The one-off glitch for a corner hit, or null when none is running.
+   * `amount` runs 1 -> 0; shake and the red/green/blue offsets are in pixels
+   * (jittering a few times a second, easing back to zero so it snaps into line).
+   */
+  glitchAt(t: number): Glitch | null {
+    const p = (t - this.glitchStart) / GLITCH_SECONDS;
+    if (p < 0 || p >= 1) return null;
+    const amount = (1 - p) * (1 - p);
+    const S = Math.min(this.areaW, this.areaH);
+    const step = Math.floor(t * 30);
+    const r = (k: number) => hash01(step * 7 + k) * 2 - 1;
+    const split = S * 0.03 * amount;
+    const shake = S * 0.014 * amount;
+    return {
+      amount,
+      shakeX: r(1) * shake,
+      shakeY: r(2) * shake * 0.6,
+      red: { x: -split * (0.6 + 0.4 * r(3)), y: split * 0.2 * r(4) },
+      green: { x: split * 0.15 * r(5), y: split * 0.15 * r(6) },
+      blue: { x: split * (0.6 + 0.4 * r(7)), y: split * 0.2 * r(8) },
+    };
+  }
+
+  /** Copies of the logo for time t: offsets along the travel direction, back to front. */
+  private copiesAt(t: number): { colour: number; dx: number; dy: number }[] {
     const p = (t - this.tStart) / this.tDur;
-    if (p >= 1) return { solid: BRAND_COLOURS[this.colour] };
+    if (p >= 1) return [{ colour: this.colour, dx: 0, dy: 0 }];
     const n = BRAND_COLOURS.length;
-    const strip: number[] = [];
-    for (let i = 0; i < n; i++) strip.push(this.from);
-    for (let l = 0; l < this.laps; l++) for (let i = 0; i < n; i++) strip.push(i);
-    for (let i = 0; i < n; i++) strip.push(this.colour);
-    // Ease in and out so the stacked brand bands are on screen for a beat.
-    const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
-    return { strip, offset: e * (strip.length - n) };
+    const env = smooth(Math.sin(Math.PI * Math.max(0, p)));
+    const gap = this.w * SPLIT_STEP * this.spread * env;
+    const copies = BRAND_COLOURS.map((_, k) => ({ colour: k, dx: this.dirX * (k - (n - 1) / 2) * gap, dy: this.dirY * (k - (n - 1) / 2) * gap }));
+    // The colour shown on top starts as the old one and ends as the new one,
+    // so the logo is the right colour at both ends of the split.
+    const top = p < 0.5 ? this.from : this.colour;
+    return copies.sort((a, b) => Number(a.colour === top) - Number(b.colour === top));
   }
 
   /** Draws logo + fireworks inside `area` (already positioned by the caller's translate/clip). */
@@ -264,20 +322,12 @@ export class LogoFx {
     ctx.scale(grow, grow);
     ctx.translate(-this.w / 2, -this.h / 2);
     ctx.scale(this.w / LOGO_VIEW_W, this.h / LOGO_VIEW_H);
-    const fill = this.fillAt(t);
-    if ("solid" in fill) {
-      ctx.fillStyle = fill.solid;
+    for (const c of this.copiesAt(t)) {
+      ctx.save();
+      ctx.translate(c.dx * (LOGO_VIEW_W / this.w), c.dy * (LOGO_VIEW_W / this.w));
+      ctx.fillStyle = BRAND_COLOURS[c.colour];
       ctx.fill(path);
-    } else {
-      ctx.clip(path);
-      const n = BRAND_COLOURS.length;
-      const bh = LOGO_VIEW_H / n;
-      const first = Math.max(0, Math.floor(fill.offset));
-      for (let i = first; i < Math.min(fill.strip.length, first + n + 2); i++) {
-        ctx.fillStyle = BRAND_COLOURS[fill.strip[i]];
-        const top = (i - fill.offset) * bh;
-        ctx.fillRect(-2, top - 0.5, LOGO_VIEW_W + 4, bh + 1);
-      }
+      ctx.restore();
     }
     ctx.restore();
     if (this.celebrating) this.drawFireworks(ctx, t);

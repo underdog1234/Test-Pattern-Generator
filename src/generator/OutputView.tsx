@@ -6,6 +6,7 @@
 // display pixel, and anything else is reported on screen.
 import { useEffect, useRef, useState } from "react";
 import { computePixelMappingStatus, watchDevicePixelRatio } from "../testPattern/pixelMapping";
+import { applyGlitch } from "./glitch";
 import { LOGO_PATH_D, LogoFx } from "./logoFx";
 import { defaultDisplay, effectiveConfig, openChannel, playbackTime, readOutputState, type OutputDisplay, type OutputRequest, type OutputState } from "./storage";
 import type { GeneratorConfig, Rect } from "./model";
@@ -37,6 +38,9 @@ const drawLogo = (ctx: CanvasRenderingContext2D, fx: LogoFx, area: Rect, t: numb
   ctx.translate(area.x, area.y);
   fx.draw(ctx, LOGO_PATH, t);
   ctx.restore();
+  // Corner hit: one quick shake + RGB split over this screen only (logo included).
+  const glitch = fx.glitchAt(t);
+  if (glitch) applyGlitch(ctx, area, glitch);
 };
 
 /** Where the logo bounces: inside every visible sub-screen on the canvas, or the one screen being shown. */

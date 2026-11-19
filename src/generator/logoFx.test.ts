@@ -61,3 +61,35 @@ describe("LogoFx", () => {
     expect(fx.bounces).toBe(0);
   });
 });
+
+describe("split and glitch", () => {
+  it("fires the glitch once per corner hit, never for edge hits", () => {
+    const fx = new LogoFx(seeded(11));
+    let glitchFrames = 0;
+    let glitchStarts = 0;
+    let prev = false;
+    for (let t = 0; t <= 140; t += 1 / 60) {
+      fx.update(t, 1920, 1080, 0);
+      const on = fx.glitchAt(t) !== null;
+      if (on) glitchFrames++;
+      if (on && !prev) glitchStarts++;
+      prev = on;
+    }
+    expect(fx.corners).toBeGreaterThanOrEqual(2); // t = 63 and 126
+    expect(glitchStarts).toBe(fx.corners);
+    expect(fx.bounces).toBeGreaterThan(fx.corners);
+    expect(glitchFrames).toBeGreaterThan(0);
+    // The glitch is brief: well under a second per corner.
+    expect(glitchFrames / 60 / fx.corners).toBeLessThan(0.7);
+  });
+
+  it("eases the glitch back to zero offset", () => {
+    const fx = new LogoFx(seeded(2));
+    let t = 0;
+    while (fx.corners === 0 && t < 100) fx.update((t += 1 / 60), 1920, 1080, 0);
+    const late = fx.glitchAt(t + 0.55);
+    expect(late).not.toBeNull();
+    expect(Math.abs(late!.red.x)).toBeLessThan(2);
+    expect(fx.glitchAt(t + 0.7)).toBeNull();
+  });
+});
