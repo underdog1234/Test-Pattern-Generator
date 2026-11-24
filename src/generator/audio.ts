@@ -146,7 +146,26 @@ export class SyncSound {
     return this.enabled && (!this.ctx || this.ctx.state !== "running");
   }
 
-  tick(config: GeneratorConfig, screens: SubScreen[], time: number, playing: boolean) {
+  // Recent animation-frame timestamps, to know the display's frame grid.
+  private frames: number[] = [];
+  // The audio clock's offset from performance.now(), sampled every frame; the median is steadier than any one reading.
+  private clockOffsets: number[] = [];
+
+  /** The display's frame time in ms, from recent frames (0 until there are enough). */
+  private framePeriod(): number {
+    if (this.frames.length < 8) return 0;
+    const d = this.frames.slice(1).map((t, i) => t - this.frames[i]).sort((a, b) => a - b);
+    const p = d[Math.floor(d.length / 2)];
+    return p > 4 && p < 50 ? p : 0;
+  }
+
+  /**
+   * `frameTs` is the animation frame's own timestamp (performance.now() clock) for the frame `time` belongs to. With
+   * it each beep is placed on the display frame that actually shows its flash: a flash lands on the first frame at or
+   * after its time, up to a whole frame late, and a beep left at the exact time would be that much early by a different
+   * amount every run.
+   */
+  tick(config: GeneratorConfig, screens: SubScreen[], time: number, playing: boolean, frameTs?: number) {
     if (!this.enabled || !playing || !this.ctx || this.ctx.state !== "running") {
       this.scheduled.clear();
       return;
@@ -154,6 +173,34 @@ export class SyncSound {
     const beeps = beepsFor(screens, config.loopSeconds);
     if (!beeps.length) return;
     const ctx = this.ctx;
+    if (frameTs !== undefined) {
+      if (!this.frames.length || frameTs > this.frames[this.frames.length - 1]) this.frames.push(frameTs);
+      if (this.frames.length > 40) this.frames.shift();
+    }
+    const period = frameTs !== undefined ? this.framePeriod() : 0;
+    const stamp = typeof ctx.getOutputTimestamp === "function" ? ctx.getOutputTimestamp() : null;
+    if (period > 0 && frameTs !== undefined && stamp && stamp.contextTime && stamp.performanceTime) {
+      // Frame-locked: a sound that is to be heard at performance time P is played at the context time that
+      // the output device reaches then, which already includes the output delay.
+      this.clockOffsets.push(stamp.contextTime - stamp.performanceTime / 1000);
+      if (this.clockOffsets.length > 45) this.clockOffsets.shift();
+      const sorted = [...this.clockOffsets].sort((a, b) => a - b);
+      const offset = sorted[Math.floor(sorted.length / 2)];
+      const heardAt = (perf: number) => offset + perf / 1000;
+      beepsBetween(beeps, config.loopSeconds, time - 0.03, time + LOOKAHEAD).forEach((b) => {
+        const key = `${Math.round(b.time * 1000)}:${b.freq}`;
+        if (this.scheduled.has(key)) return;
+        // The first display frame at or after the beep's time, as a time on the frame clock.
+        const frame = Math.max(0, Math.ceil(((b.time - time) * 1000) / period - 1e-6));
+        // The frame is drawn at its timestamp and shown at the next refresh, one frame period later.
+        const when = heardAt(frameTs + (frame + 1) * period) + this.offsetMs / 1000;
+        if (when < ctx.currentTime - 0.005) return;
+        this.scheduled.add(key);
+        playTone(ctx, ctx.destination, Math.max(ctx.currentTime, when), b);
+      });
+      if (this.scheduled.size > 256) this.scheduled = new Set([...this.scheduled].slice(-64));
+      return;
+    }
     // The browser's own output delay is taken off, so the beep leaves the
     // speaker when the frame it belongs to is drawn.
     const outputDelay = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);

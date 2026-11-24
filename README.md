@@ -16,7 +16,9 @@ The live output draws from the browser's own frame timestamp (`src/generator/fra
 
 ## Receive (partner meter)
 
-`receive.html` is a second page, linked as **Receive** in the generator's header. Run the AV Sync Flash and Beep pattern on a screen (Configurations → **AV sync check**), point a phone or laptop at it, and Receive uses its camera and microphone to measure how far the picture and the sound are apart, in milliseconds. Detection logic is in `src/receive/sync.ts`; the microphone runs in an AudioWorklet (`toneWorklet.ts`); the camera and mic engine is `engine.ts`.
+`receive.html` is a second page, linked as **Receive** in the generator's header. Run the AV Sync Flash and Beep pattern on a screen (Configurations → **AV sync check**), point a phone or laptop at it, and Receive uses its camera and microphone to measure how far the picture and the sound are apart, in milliseconds. **Pairing:** the generator's Output section has **Show QR code on output**. Scanning it opens Receive with a random session ID; the QR code disappears once the page opens, and the sender's output then shows the receiver's readings, the link delay, and whether both clocks are synced to world time. The two devices exchange only small status messages (clock accuracy, measured delays) through the free public relay ntfy.sh, on a topic named after that random ID. **Lock to world time** makes the flashes happen exactly on each second of real time, so Receive can also measure link delay; clocks are set from a network time server (`src/shared/worldClock.ts`), not trusted from the device.
+
+Detection logic is in `src/receive/sync.ts`; the microphone runs in an AudioWorklet (`toneWorklet.ts`); the camera and mic engine is `engine.ts`.
 
 ## Bouncing Multi logo
 

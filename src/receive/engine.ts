@@ -1,6 +1,6 @@
 // Camera + microphone -> flash and beep times, on one clock (performance.now()).
 
-import { BEEP_HZ, RiseDetector, refineOnset } from "./sync";
+import { BEEP_HZ, CentroidCapture, RiseDetector } from "./sync";
 import { TONE_WINDOW, TONE_WORKLET_NAME, toneWorkletUrl } from "./toneWorklet";
 
 export type Roi = { x: number; y: number; w: number; h: number };
@@ -35,6 +35,10 @@ export type Meters = {
 
 const SAMPLE = { w: 32, h: 18 };
 
+// Camera frames come every 17-40 ms; the beep's strength is read every ~2.7 ms.
+const newFlashCapture = () => new CentroidCapture({ keepMs: 400, preMs: 60, maxMs: 450, endFraction: 0.3, endQuiet: 2 });
+const newToneCapture = () => new CentroidCapture({ keepMs: 200, preMs: 20, maxMs: 160, endFraction: 0.3, endQuiet: 4 });
+
 export class MeasureEngine {
   readonly video = document.createElement("video");
   config: EngineConfig;
@@ -45,6 +49,8 @@ export class MeasureEngine {
   private g: CanvasRenderingContext2D;
   private flash: RiseDetector;
   private tone: RiseDetector;
+  private flashCap = newFlashCapture();
+  private toneCap = newToneCapture();
   private alive = false;
   private frameTimes: number[] = [];
   private lastMeters: Meters = {
@@ -59,8 +65,6 @@ export class MeasureEngine {
   };
   // context time -> performance.now: the smallest (arrival - context time) seen recently is the truest.
   private clockOffsets: Array<[number, number]> = [];
-  private history: Array<[number, number]> = [];
-  private pendingBeep: { fireEnd: number } | null = null;
   private handlers: EngineHandlers;
 
   constructor(config: EngineConfig, handlers: EngineHandlers) {
@@ -121,8 +125,8 @@ export class MeasureEngine {
     this.video.srcObject = null;
     this.frameTimes = [];
     this.clockOffsets = [];
-    this.history = [];
-    this.pendingBeep = null;
+    this.flashCap = newFlashCapture();
+    this.toneCap = newToneCapture();
     this.flash = new RiseDetector({ minRise: 8, holdoffMs: 250, sensitivity: () => this.config.videoSensitivity });
     this.tone = new RiseDetector({ minRise: 0.03, holdoffMs: 250, baselineMs: 1000, sensitivity: () => this.config.toneSensitivity });
   }
@@ -163,8 +167,12 @@ export class MeasureEngine {
     let sum = 0;
     for (let i = 0; i < px.length; i += 4) sum += 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
     const luma = sum / (px.length / 4);
+    this.flashCap.push(t, luma);
     const fired = this.flash.push(t, luma);
-    if (fired !== null) this.handlers.onFlash(fired);
+    if (fired !== null) this.flashCap.start(fired, this.flash.baselineValue, this.flash.threshold);
+    // The flash is reported by its middle once it is over (a couple of frames later).
+    const centre = this.flashCap.update(t, luma);
+    if (centre !== null) this.handlers.onFlash(centre);
   }
 
   // --- sound ----------------------------------------------------------------------
@@ -196,19 +204,13 @@ export class MeasureEngine {
     const arrival = performance.now();
     this.clockOffsets.push([arrival, arrival - end * 1000]);
     while (this.clockOffsets.length && arrival - this.clockOffsets[0][0] > 8000) this.clockOffsets.shift();
-    const t = this.toPerf(end);
-    this.history.push([t, mag]);
-    if (this.history.length > 40) this.history.shift();
+    // Each reading covers the window that ends at `end`; its middle is half a window earlier.
+    const windowMs = (TONE_WINDOW / (this.ctx?.sampleRate ?? 48000)) * 1000;
+    const t = this.toPerf(end) - windowMs / 2;
+    this.toneCap.push(t, mag);
     const fired = this.tone.push(t, mag);
-    if (fired !== null) this.pendingBeep = { fireEnd: fired };
-    // A few readings after the trigger the peak is known: place the onset from the ramp.
-    if (this.pendingBeep && t - this.pendingBeep.fireEnd >= 22) {
-      const from = this.pendingBeep.fireEnd - 16;
-      const readings = this.history.filter((h) => h[0] >= from);
-      const windowMs = (TONE_WINDOW / (this.ctx?.sampleRate ?? 48000)) * 1000;
-      const onset = refineOnset(readings, windowMs) ?? this.pendingBeep.fireEnd - windowMs / 2;
-      this.pendingBeep = null;
-      this.handlers.onBeep(onset - this.lastMeters.micLatencyMs);
-    }
+    if (fired !== null) this.toneCap.start(fired, this.tone.baselineValue, this.tone.threshold);
+    const centre = this.toneCap.update(t, mag);
+    if (centre !== null) this.handlers.onBeep(centre - this.lastMeters.micLatencyMs);
   }
 }

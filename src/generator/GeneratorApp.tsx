@@ -39,7 +39,10 @@ import {
   type ResolutionPreset,
   type SubScreen,
 } from "./model";
+import { frameEpochMs } from "./frameClock";
 import OutputPanel from "./OutputPanel";
+import { measureWorldClock } from "../shared/worldClock";
+import { PairLink, newSessionId, receiveUrl, type PairingView, type ReceiverStatus } from "../shared/pairing";
 import OutputView from "./OutputView";
 import { BUILT_IN_PLAYLISTS, buildBuiltInPlaylist } from "./presets";
 import { ArrangePanel, CanvasSettings, Inspector, PlaylistPanel, ScreenList, type AlignRef } from "./panels";
@@ -182,13 +185,20 @@ export default function GeneratorApp() {
     }
     return () => channel?.close();
   }, []);
-  const outputStateRef = useRef<OutputState>({ config, playback, display });
+  // Pairing with a Receive page on another device: its QR code, and what it reports back.
+  const [pair, setPair] = useState<{ id: string; url: string; joined: boolean; receiver: ReceiverStatus | null; seenAt: number | null } | null>(null);
+  const pairingView = useMemo<PairingView | null>(
+    () => (pair ? { url: pair.url, joined: pair.joined, senderClock: playback.world ?? null, receiver: pair.receiver, receiverSeenAt: pair.seenAt } : null),
+    [pair, playback.world],
+  );
+  const pairLink = useRef<PairLink | null>(null);
+  const outputStateRef = useRef<OutputState>({ config, playback, display, pairing: pairingView });
   useEffect(() => {
     playbackRef.current = playback;
-    outputStateRef.current = { config, playback, display };
+    outputStateRef.current = { config, playback, display, pairing: pairingView };
     const id = window.setTimeout(() => publishOutputState(outputStateRef.current, channelRef.current), 30);
     return () => window.clearTimeout(id);
-  }, [config, playback, display]);
+  }, [config, playback, display, pairingView]);
 
   // A coarse clock for the playback readout and playlist highlight.
   useEffect(() => {
@@ -200,16 +210,16 @@ export default function GeneratorApp() {
   }, [inlineOutput]);
 
   // What the editor preview draws each frame.
-  const frameSource = useRef(() => {
+  const frameSource = useRef((frameTs?: number) => {
     const p = playbackRef.current;
-    const t = Date.now();
+    const t = frameTs === undefined ? Date.now() : frameEpochMs(frameTs);
     return { config: effectiveConfig(configRef.current, p, t).config, time: playbackTime(p, t) };
   });
   // Effective config caches per (config, playlist step, auto-cycle step) so the preview can skip identical frames.
   const effCache = useRef<{ base: GeneratorConfig | null; step: string | null; result: GeneratorConfig | null }>({ base: null, step: null, result: null });
-  frameSource.current = () => {
+  frameSource.current = (frameTs?: number) => {
     const p = playbackRef.current;
-    const t = Date.now();
+    const t = frameTs === undefined ? Date.now() : frameEpochMs(frameTs);
     const eff = effectiveConfig(configRef.current, p, t);
     const c = effCache.current;
     const step = `${eff.stepIndex}|${eff.cycleStep}`;
@@ -224,10 +234,10 @@ export default function GeneratorApp() {
   const inlineOutputRef = useRef(inlineOutput);
   inlineOutputRef.current = inlineOutput;
   const sound = useSyncSound(
-    () => {
+    (frameTs) => {
       // The inline fullscreen output plays its own tones.
       if (inlineOutputRef.current) return null;
-      const f = frameSource.current();
+      const f = frameSource.current(frameTs);
       return { config: f.config, screens: f.config.screens, time: f.time, playing: playbackRef.current.playing };
     },
     "testPatternGenerator:sound:editor",
@@ -442,6 +452,48 @@ export default function GeneratorApp() {
     flash(`Loaded the "${def.name}" playlist (${steps.length} steps). Press Play playlist to run it.`);
   };
 
+  // Lock the pattern clock to world time (for the Receive page's link-delay reading).
+  const [worldSync, setWorldSync] = useState<{ busy: boolean; progress: number; failed: boolean }>({ busy: false, progress: 0, failed: false });
+  const lockWorld = async () => {
+    setWorldSync({ busy: true, progress: 0, failed: false });
+    try {
+      const fix = await measureWorldClock(undefined, { onProgress: (n, total) => setWorldSync((w) => ({ ...w, progress: n / total })) });
+      setPlayback((p) => ({ ...p, world: { offsetMs: fix.offsetMs, uncertaintyMs: fix.uncertaintyMs } }));
+      setWorldSync({ busy: false, progress: 1, failed: false });
+    } catch {
+      setWorldSync({ busy: false, progress: 0, failed: true });
+    }
+  };
+  const unlockWorld = () => setPlayback((p) => ({ ...p, world: null }));
+
+  const startPairing = () => {
+    pairLink.current?.stop();
+    const id = newSessionId();
+    setPair({ id, url: receiveUrl(id), joined: false, receiver: null, seenAt: null });
+    const link = new PairLink(id, "sender", (m) => {
+      if (m.role === "receiver") setPair((p) => (p && p.id === id ? { ...p, joined: true, receiver: m, seenAt: Date.now() } : p));
+    });
+    link.start();
+    pairLink.current = link;
+    // The link-delay reading needs the flashes on the second of real time.
+    if (!playbackRef.current.world) void lockWorld();
+  };
+  const stopPairing = () => {
+    pairLink.current?.stop();
+    pairLink.current = null;
+    setPair(null);
+  };
+  useEffect(() => () => pairLink.current?.stop(), []);
+  // Tell the receiver how this clock stands, now and every few seconds.
+  useEffect(() => {
+    const link = pairLink.current;
+    if (!pair || !link) return;
+    const send = () => link.send({ role: "sender", at: Date.now(), clock: playbackRef.current.world ?? null });
+    send();
+    const id = window.setInterval(send, 8000);
+    return () => window.clearInterval(id);
+  }, [pair?.id, pair?.joined, playback.world]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Opened from the planner's Test Pattern Generator button: bring its
   // project in once, then drop the flag so a reload keeps any edits.
   const fromPlannerDone = useRef(false);
@@ -607,6 +659,13 @@ export default function GeneratorApp() {
             onDisplay={patchDisplay}
             windowStatus={outputWindowLive ? { fullscreen: outputStatus!.fullscreen, oneToOne: outputStatus!.oneToOne } : null}
             sound={sound}
+            world={playback.world ?? null}
+            worldSync={worldSync}
+            onLockWorld={() => void lockWorld()}
+            onUnlockWorld={unlockWorld}
+            pairing={pairingView}
+            onStartPairing={startPairing}
+            onStopPairing={stopPairing}
           />
           <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
             <CanvasEditor

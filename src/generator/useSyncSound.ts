@@ -25,7 +25,7 @@ const readPrefs = (key: string, defaultOn: boolean): Prefs => {
  * separate output window takes both from the editor.
  */
 export function useSyncSound(
-  source: () => SoundFrame | null,
+  source: (frameTs: number) => SoundFrame | null,
   key: string,
   defaultOn: boolean,
   controlled?: { enabled: boolean; offsetMs: number; onEnabled: (v: boolean) => void },
@@ -72,9 +72,9 @@ export function useSyncSound(
     let lastCheck = 0;
     const tick = (ts: number) => {
       raf = requestAnimationFrame(tick);
-      const f = sourceRef.current();
+      const f = sourceRef.current(ts);
       const s = sound.current!;
-      if (f) s.tick(f.config, f.screens, f.time, f.playing);
+      if (f) s.tick(f.config, f.screens, f.time, f.playing, ts);
       if (ts - lastCheck > 400) {
         lastCheck = ts;
         setBlocked(s.blocked);

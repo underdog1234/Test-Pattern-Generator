@@ -20,7 +20,7 @@ import { renderComposite } from "./render";
 type Props = {
   config: GeneratorConfig;
   /** Read every frame: what to draw and at what point in the loop. */
-  frameSource: React.MutableRefObject<() => { config: GeneratorConfig; time: number }>;
+  frameSource: React.MutableRefObject<(frameTs?: number) => { config: GeneratorConfig; time: number }>;
   selectedIds: string[];
   onSelect: (ids: string[]) => void;
   /** Called once when a drag starts, so the whole drag is one undo step. */

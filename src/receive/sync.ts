@@ -90,6 +90,11 @@ export class RiseDetector {
     return fired;
   }
 
+  /** The quiet level the detector is measuring rises from (frozen while an event is in progress). */
+  get baselineValue(): number {
+    return this.baseline ?? 0;
+  }
+
   get level(): number {
     return this.baseline === null ? 0 : (this.last?.value ?? 0) - this.baseline;
   }
@@ -186,17 +191,113 @@ export const describeOffset = (ms: number, tolerance = 8): string => {
 export const toCsv = (pairs: Pair[], compensationMs: number): string =>
   ["n,flash_ms,beep_ms,offset_ms_raw,offset_ms_compensated", ...pairs.map((p, i) => `${i + 1},${p.flashAt.toFixed(1)},${p.beepAt.toFixed(1)},${p.offsetMs.toFixed(1)},${(p.offsetMs - compensationMs).toFixed(1)}`)].join("\n");
 
+// --- event centres -------------------------------------------------------------------
+
+export type Sample = [t: number, value: number];
+
 /**
- * When a tone really began, from the readings taken as it came in. A reading is
- * the tone's strength over the last `windowMs`, so it ramps up as the tone
- * enters that window: half strength means half the window is tone. `readings`
- * are [time the window ended, strength], oldest first, from just before the
- * trigger to a little after it.
+ * The time at the middle of a flash or a beep, from every reading across it.
+ *
+ * Timing the first reading over a threshold is jumpy: a camera frame rounds it
+ * to the frame (33 ms at 30 fps), and a louder beep crosses the threshold
+ * sooner than a quieter one. The weighted middle of the event does not care how
+ * loud or bright it was, and a flash that straddles two frames still lands in
+ * between them. Both the flash and the beep last the same time on the sender, so
+ * comparing their middles is fair.
  */
-export const refineOnset = (readings: Array<[number, number]>, windowMs: number): number | null => {
-  if (!readings.length) return null;
-  const peak = Math.max(...readings.map((r) => r[1]));
-  if (peak <= 0) return null;
-  const half = readings.find((r) => r[1] >= peak * 0.5);
-  return half ? half[0] - windowMs * 0.5 : null;
+export class CentroidCapture {
+  private recent: Sample[] = [];
+  private active: { fire: number; base: number; thr: number; samples: Sample[]; quiet: number; lastT: number } | null = null;
+
+  constructor(private readonly o: { keepMs: number; preMs: number; maxMs: number; endFraction: number; endQuiet: number }) {}
+
+  /** Every reading goes in here first. */
+  push(t: number, v: number): void {
+    this.recent.push([t, v]);
+    while (this.recent.length > 1 && t - this.recent[0][0] > this.o.keepMs) this.recent.shift();
+  }
+
+  /** Call when the detector has just fired on the reading that was pushed last. */
+  start(fire: number, baseline: number, threshold: number): void {
+    const pre = this.recent.filter((r) => r[0] >= fire - this.o.preMs);
+    this.active = { fire, base: baseline, thr: threshold, samples: pre, quiet: 0, lastT: pre.length ? pre[pre.length - 1][0] : fire };
+  }
+
+  /** Call after push() for each reading; returns the event's centre time once the event is over. */
+  update(t: number, v: number): number | null {
+    const a = this.active;
+    if (!a) return null;
+    if (t > a.lastT) {
+      a.samples.push([t, v]);
+      a.lastT = t;
+    }
+    a.quiet = v - a.base < a.thr * this.o.endFraction ? a.quiet + 1 : 0;
+    if (a.quiet < this.o.endQuiet && t - a.fire < this.o.maxMs) return null;
+    this.active = null;
+    // Weights: how far above the quiet level, less a little for noise.
+    let sw = 0;
+    let st = 0;
+    for (const [ts, val] of a.samples) {
+      const w = Math.max(0, val - a.base - a.thr * 0.2);
+      sw += w;
+      st += w * ts;
+    }
+    return sw > 0 ? st / sw : a.fire;
+  }
+}
+
+// --- robust summary ----------------------------------------------------------------------
+
+export type RobustSummary = Summary & { rejected: number };
+
+const medianOf = (values: number[]) => {
+  const s = [...values].sort((a, b) => a - b);
+  const n = s.length;
+  return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+};
+
+/** Like summarize(), but readings far from the middle (a missed frame, a door slam) are set aside first. */
+export const robustSummary = (values: number[]): RobustSummary | null => {
+  if (!values.length) return null;
+  const med = medianOf(values);
+  const mad = medianOf(values.map((v) => Math.abs(v - med)));
+  const limit = Math.max(15, 3 * 1.4826 * mad);
+  const kept = values.filter((v) => Math.abs(v - med) <= limit);
+  const s = summarize(kept)!;
+  return { ...s, rejected: values.length - kept.length, stable: s.n >= 5 && s.sd <= 10 };
+};
+
+// --- link delay (needs both clocks on world time) --------------------------------------------
+
+export type LinkDelay = { videoMs: number[]; audioMs: number[]; interval: number; lockedVideo: number; lockedAudio: number };
+
+/**
+ * The sender flashes and beeps starting on every world-time multiple of `intervalMs`.
+ * Given where the receiver saw the middle of each event, in world time, the delay
+ * of each is how long after its grid time it arrived. Delays are only unambiguous
+ * below half an interval.
+ */
+export const linkDelays = (flashCentres: number[], beepCentres: number[], durationMs: number, intervalMs: number): LinkDelay => {
+  const delay = (c: number) => {
+    const start = c - durationMs / 2;
+    const k = Math.round(start / intervalMs);
+    return start - k * intervalMs;
+  };
+  // How tightly the delays agree around the interval (1 = identical, 0 = scattered). A sender that is
+  // not locked to world time scatters them all round the interval.
+  const lock = (xs: number[]) => {
+    if (xs.length < 3) return 0;
+    const a = xs.map((x) => (x / intervalMs) * 2 * Math.PI);
+    return Math.hypot(a.reduce((s, v) => s + Math.cos(v), 0), a.reduce((s, v) => s + Math.sin(v), 0)) / xs.length;
+  };
+  const videoMs = flashCentres.map(delay);
+  const audioMs = beepCentres.map(delay);
+  return { videoMs, audioMs, interval: intervalMs, lockedVideo: lock(videoMs), lockedAudio: lock(audioMs) };
+};
+
+/** The sender's interval, from how far apart the flashes are: the median gap, to the nearest second. */
+export const guessInterval = (times: number[]): number => {
+  if (times.length < 3) return 1000;
+  const gaps = times.slice(1).map((t, i) => t - times[i]);
+  return Math.max(1000, Math.round(medianOf(gaps) / 1000) * 1000);
 };

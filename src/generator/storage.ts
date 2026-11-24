@@ -8,6 +8,7 @@
 // BroadcastChannel.
 // ---------------------------------------------------------------------------
 
+import type { PairingView } from "../shared/pairing";
 import { AUTO_CYCLE_IDS } from "./patterns";
 import { applyAutoCycle, applyPlaylistStep, normalizeConfig, normalizePresets, playlistStepAt, type GeneratorConfig, type ResolutionPreset } from "./model";
 
@@ -78,11 +79,21 @@ export type Playback = {
   /** Pattern clock, seconds, at `anchor`. */
   anchorTime: number;
   playlist: { active: boolean; loop: boolean; startTime: number };
+  /**
+   * Locked to world time: while playing, the pattern clock is the real time of day (seconds since 1970, corrected by
+   * `offsetMs` from a time server), so a flash that happens "on the second" really happens on the second - on every
+   * device that is locked, and for the Receive page to measure link delay against.
+   */
+  world?: { offsetMs: number; uncertaintyMs: number } | null;
 };
 
 export const defaultPlayback = (): Playback => ({ playing: true, anchor: Date.now(), anchorTime: 0, playlist: { active: false, loop: true, startTime: 0 } });
 
-export const playbackTime = (p: Playback, now = Date.now()): number => (p.playing ? p.anchorTime + (now - p.anchor) / 1000 : p.anchorTime);
+export const playbackTime = (p: Playback, now = Date.now()): number => {
+  if (!p.playing) return p.anchorTime;
+  if (p.world) return (now + p.world.offsetMs) / 1000;
+  return p.anchorTime + (now - p.anchor) / 1000;
+};
 
 /**
  * How the output shows itself - live only, never part of a download. Set from
@@ -118,7 +129,7 @@ export const loadDisplayPrefs = (): Partial<OutputDisplay> => {
 
 export const saveDisplayPrefs = (d: OutputDisplay) => write(DISPLAY_KEY, { logo: d.logo, fit: d.fit, status: d.status, beeps: d.beeps });
 
-export type OutputState = { config: GeneratorConfig; playback: Playback; display: OutputDisplay };
+export type OutputState = { config: GeneratorConfig; playback: Playback; display: OutputDisplay; /** QR code and receiver status, while a receiver is being paired. */ pairing?: PairingView | null };
 
 /** What an output window sends back: a change to the display settings. */
 export type OutputRequest = { type: "display"; patch: Partial<OutputDisplay> } | { type: "status"; fullscreen: boolean; oneToOne: boolean };
@@ -133,9 +144,9 @@ export const publishOutputState = (state: OutputState, channel: BroadcastChannel
 };
 
 export const readOutputState = (): OutputState | null => {
-  const raw = read(OUTPUT_KEY) as { config?: unknown; playback?: Playback; display?: Partial<OutputDisplay> } | null;
+  const raw = read(OUTPUT_KEY) as { config?: unknown; playback?: Playback; display?: Partial<OutputDisplay>; pairing?: PairingView | null } | null;
   if (!raw || !raw.config) return null;
-  return { config: normalizeConfig(raw.config), playback: raw.playback ?? defaultPlayback(), display: { ...defaultDisplay(), ...(raw.display ?? {}) } };
+  return { config: normalizeConfig(raw.config), playback: raw.playback ?? defaultPlayback(), display: { ...defaultDisplay(), ...(raw.display ?? {}) }, pairing: raw.pairing ?? null };
 };
 
 export const openChannel = (): BroadcastChannel | null => {

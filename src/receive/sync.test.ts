@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BEEP_HZ, Pairer, RiseDetector, describeOffset, goertzel, refineOnset, summarize, toCsv } from "./sync";
+import { BEEP_HZ, CentroidCapture, Pairer, RiseDetector, describeOffset, goertzel, guessInterval, linkDelays, robustSummary, summarize, toCsv } from "./sync";
 
 const tone = (freq: number, n: number, rate: number, amp = 0.5) => Float32Array.from({ length: n }, (_, i) => amp * Math.sin((2 * Math.PI * freq * i) / rate));
 
@@ -59,15 +59,59 @@ describe("RiseDetector (flashes)", () => {
   });
 });
 
-describe("tone onset", () => {
-  it("places the start half a window before the half-strength reading", () => {
-    // Tone starts at t = 1000 ms; a 5 ms window ramps up as it enters.
-    const win = 5;
-    const readings: Array<[number, number]> = [];
-    for (let t = 990; t <= 1030; t += 2.67) readings.push([t, Math.min(1, Math.max(0, (t - 1000) / win)) * 0.4]);
-    const onset = refineOnset(readings, win)!;
-    expect(Math.abs(onset - 1000)).toBeLessThan(3);
-    expect(refineOnset([], win)).toBeNull();
+// A camera: each frame's brightness is the share of its exposure (= the frame time) that the flash covers.
+const cameraSees = (fps: number, phaseMs: number, flashStart: number, flashLen: number, base = 40, height = 120) => {
+  const T = 1000 / fps;
+  const out: Array<[number, number]> = [];
+  for (let i = 0; i < 80; i += 1) {
+    const f0 = phaseMs + i * T;
+    const overlap = Math.max(0, Math.min(f0 + T, flashStart + flashLen) - Math.max(f0, flashStart));
+    out.push([f0, base + height * (overlap / T)]);
+  }
+  return out;
+};
+
+describe("event centres vs first-over-threshold", () => {
+  const run = (frames: Array<[number, number]>) => {
+    const d = new RiseDetector({ minRise: 8, holdoffMs: 250 });
+    const cap = new CentroidCapture({ keepMs: 400, preMs: 60, maxMs: 450, endFraction: 0.3, endQuiet: 2 });
+    let onset: number | null = null;
+    let centre: number | null = null;
+    for (const [t, v] of frames) {
+      cap.push(t, v);
+      const f = d.push(t, v);
+      if (f !== null) {
+        onset = f;
+        cap.start(f, d.baselineValue, d.threshold);
+      }
+      const c = cap.update(t, v);
+      if (c !== null) centre = c;
+    }
+    return { onset, centre };
+  };
+  const sd = (a: number[]) => {
+    const m = a.reduce((x, y) => x + y, 0) / a.length;
+    return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length);
+  };
+
+  it("finds the middle of a 33 ms flash far more steadily than the first frame over the threshold, at 30 fps", () => {
+    const flashStart = 1000;
+    const errCentre: number[] = [];
+    const errOnset: number[] = [];
+    // The camera's frame grid lands differently against the flash each time.
+    for (let phase = 0; phase < 33.3; phase += 1.7) {
+      const { onset, centre } = run(cameraSees(30, phase, flashStart, 33.3));
+      errCentre.push(centre! - (flashStart + 16.65 + 16.65)); // frame times are exposure starts: the middle of a frame is half a frame later
+      errOnset.push(onset! - flashStart);
+    }
+    expect(sd(errOnset)).toBeGreaterThan(7); // rounding to the frame: spread over a whole frame
+    expect(sd(errCentre)).toBeLessThan(4);
+  });
+
+  it("does not move when the flash is brighter", () => {
+    const a = run(cameraSees(60, 3, 1000, 33.3, 40, 60)).centre!;
+    const b = run(cameraSees(60, 3, 1000, 33.3, 40, 160)).centre!;
+    expect(Math.abs(a - b)).toBeLessThan(2.5);
   });
 });
 
@@ -86,6 +130,37 @@ describe("Pairer", () => {
     const p = new Pairer(450);
     p.addFlash(1000);
     expect(p.addBeep(1600)).toBeNull();
+  });
+});
+
+describe("robust summary", () => {
+  it("sets aside outliers and reports how many", () => {
+    const s = robustSummary([40, 41, 39, 42, 40, 120, 38, 41, 40, -60])!;
+    expect(s.rejected).toBe(2);
+    expect(s.median).toBe(40);
+    expect(s.sd).toBeLessThan(2);
+    expect(s.stable).toBe(true);
+    expect(robustSummary([])).toBeNull();
+  });
+});
+
+describe("link delay", () => {
+  it("reads the delay of the picture and of the sound from the world-time grid", () => {
+    const secs = [10, 11, 12, 13, 14, 15].map((x) => x * 1000);
+    const flashes = secs.map((x) => x + 83 + 16.5);
+    const beeps = secs.map((x) => x + 61 + 16.5);
+    const d = linkDelays(flashes, beeps, 33, 1000);
+    d.videoMs.forEach((v) => expect(v).toBeCloseTo(83, 0));
+    d.audioMs.forEach((v) => expect(v).toBeCloseTo(61, 0));
+    expect(d.lockedVideo).toBeGreaterThan(0.99);
+  });
+  it("shows a sender that is not on world time as scattered", () => {
+    expect(linkDelays([10120, 11460, 12710, 13240, 14890, 15530], [], 33, 1000).lockedVideo).toBeLessThan(0.7);
+  });
+  it("works out the sender's interval from the flash spacing", () => {
+    expect(guessInterval([1000, 2010, 2990, 4005])).toBe(1000);
+    expect(guessInterval([0, 4020, 7990, 12010])).toBe(4000);
+    expect(guessInterval([5])).toBe(1000);
   });
 });
 

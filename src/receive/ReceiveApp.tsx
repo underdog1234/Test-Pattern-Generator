@@ -5,11 +5,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NumField, Panel, SelectField, SmallButton } from "../generator/controls";
 import { MeasureEngine, type Meters, type Roi } from "./engine";
-import { Pairer, describeOffset, summarize, toCsv, type Pair } from "./sync";
+import { measureWorldClock, type ClockFix } from "../shared/worldClock";
+import { PairLink, clockText, clocksLinedUp, sessionFromUrl, type ReceiverStatus, type SenderStatus } from "../shared/pairing";
+import { Pairer, describeOffset, guessInterval, linkDelays, robustSummary, toCsv, type Pair } from "./sync";
 
 const STORE = "testPatternGenerator:receive:v1";
-type Prefs = { videoSensitivity: number; toneSensitivity: number; compensationMs: number; window: number; fps: string; roi: Roi; videoId: string; audioId: string };
-const DEFAULT_PREFS: Prefs = { videoSensitivity: 1, toneSensitivity: 1, compensationMs: 0, window: 10, fps: "60", roi: { x: 0, y: 0, w: 1, h: 1 }, videoId: "", audioId: "" };
+type Prefs = { videoSensitivity: number; toneSensitivity: number; compensationMs: number; window: number; fps: string; roi: Roi; videoId: string; audioId: string; eventMs: number };
+const DEFAULT_PREFS: Prefs = { videoSensitivity: 1, toneSensitivity: 1, compensationMs: 0, window: 20, fps: "60", roi: { x: 0, y: 0, w: 1, h: 1 }, videoId: "", audioId: "", eventMs: 33 };
 
 const loadPrefs = (): Prefs => {
   try {
@@ -59,7 +61,17 @@ export default function ReceiveApp() {
   pausedRef.current = paused;
   const [devices, setDevices] = useState<{ video: MediaDeviceInfo[]; audio: MediaDeviceInfo[] }>({ video: [], audio: [] });
   const [startedAt, setStartedAt] = useState(0);
+  // The middle of every flash and beep, on this page's clock (performance.now), for the link-delay reading.
+  const [events, setEvents] = useState<{ flashes: number[]; beeps: number[] }>({ flashes: [], beeps: [] });
+  const [clock, setClock] = useState<{ fix: ClockFix | null; state: "idle" | "syncing" | "failed"; progress: number }>({ fix: null, state: "idle", progress: 0 });
   const [tick, setTick] = useState(0);
+
+  // Pairing: opened from the sender's QR code, this page reports what it measures and hears how the sender's clock stands.
+  const session = useMemo(() => sessionFromUrl(location.search), []);
+  const [sender, setSender] = useState<{ status: SenderStatus; seenAt: number } | null>(null);
+  const [relayUp, setRelayUp] = useState(false);
+  const pairLink = useRef<PairLink | null>(null);
+  const statusRef = useRef<ReceiverStatus | null>(null);
 
   const pairer = useRef(new Pairer(450));
   const engine = useRef<MeasureEngine | null>(null);
@@ -77,10 +89,12 @@ export default function ReceiveApp() {
         {
           onFlash: (t) => {
             setCounts((c) => ({ ...c, flashes: c.flashes + 1 }));
+            setEvents((e) => ({ ...e, flashes: [...e.flashes.slice(-59), t] }));
             onPair(pairer.current.addFlash(t));
           },
           onBeep: (t) => {
             setCounts((c) => ({ ...c, beeps: c.beeps + 1 }));
+            setEvents((e) => ({ ...e, beeps: [...e.beeps.slice(-59), t] }));
             onPair(pairer.current.addBeep(t));
           },
         },
@@ -93,6 +107,20 @@ export default function ReceiveApp() {
   useEffect(() => {
     if (engine.current) engine.current.config = { videoSensitivity: prefs.videoSensitivity, toneSensitivity: prefs.toneSensitivity, roi: prefs.roi };
   }, [prefs.videoSensitivity, prefs.toneSensitivity, prefs.roi]);
+
+  useEffect(() => {
+    if (!session) return;
+    const link = new PairLink(session, "receiver", (m) => m.role === "sender" && setSender({ status: m, seenAt: Date.now() }), setRelayUp);
+    pairLink.current = link;
+    link.start();
+    // Opening the page is what tells the sender to take its QR code down.
+    link.send({ role: "receiver", at: Date.now(), running: false, clock: null, av: null, link: null, fps: 0 });
+    const id = window.setInterval(() => statusRef.current && link.send({ ...statusRef.current, at: Date.now() }), 3000);
+    return () => {
+      window.clearInterval(id);
+      link.stop();
+    };
+  }, [session]);
 
   const refreshDevices = async () => {
     try {
@@ -116,6 +144,8 @@ export default function ReceiveApp() {
       pairer.current = new Pairer(450);
       setRunning(true);
       setStartedAt(Date.now());
+      setEvents({ flashes: [], beeps: [] });
+      void syncClock();
       await refreshDevices();
       try {
         wake.current = await (navigator as unknown as { wakeLock?: { request: (t: string) => Promise<{ release: () => Promise<void> }> } }).wakeLock?.request("screen") ?? null;
@@ -127,6 +157,16 @@ export default function ReceiveApp() {
       setRunning(false);
     } finally {
       setStarting(false);
+    }
+  };
+
+  const syncClock = async () => {
+    setClock((c) => ({ ...c, state: "syncing", progress: 0 }));
+    try {
+      const fix = await measureWorldClock(undefined, { onProgress: (n, total) => setClock((c) => ({ ...c, progress: n / total })) });
+      setClock({ fix, state: "idle", progress: 1 });
+    } catch {
+      setClock((c) => ({ ...c, state: "failed" }));
     }
   };
 
@@ -150,6 +190,7 @@ export default function ReceiveApp() {
   const reset = () => {
     setPairs([]);
     setCounts({ flashes: 0, beeps: 0 });
+    setEvents({ flashes: [], beeps: [] });
     pairer.current = new Pairer(450);
     setStartedAt(Date.now());
   };
@@ -158,9 +199,34 @@ export default function ReceiveApp() {
 
   const adjusted = useMemo(() => pairs.map((p) => p.offsetMs - prefs.compensationMs), [pairs, prefs.compensationMs]);
   const recent = adjusted.slice(-Math.max(3, prefs.window));
-  const sum = summarize(recent);
+  const sum = robustSummary(recent);
   const fpsNum = Number(prefs.fps) || 60;
   const frameMs = meters && meters.fps > 5 ? 1000 / meters.fps : 0;
+
+  // Link delay: world-time latency of the picture and of the sound against the sender's whole-second grid.
+  const link = useMemo(() => {
+    if (!clock.fix || events.flashes.length < 3) return null;
+    const toWorld = (t: number) => performance.timeOrigin + t + clock.fix!.offsetMs;
+    const flashW = events.flashes.map(toWorld);
+    const beepW = events.beeps.map(toWorld);
+    const interval = guessInterval(flashW);
+    const d = linkDelays(flashW, beepW, prefs.eventMs, interval);
+    const keep = Math.max(3, prefs.window);
+    return { ...d, video: robustSummary(d.videoMs.slice(-keep)), audio: robustSummary(d.audioMs.slice(-keep)) };
+  }, [events, clock.fix, prefs.eventMs, prefs.window]);
+
+  statusRef.current = {
+    role: "receiver",
+    at: 0,
+    running,
+    clock: clock.fix ? { offsetMs: clock.fix.offsetMs, uncertaintyMs: clock.fix.uncertaintyMs } : null,
+    av: sum ? { medianMs: sum.median, sdMs: sum.sd, n: sum.n, stable: sum.stable } : null,
+    link: link ? { videoMs: link.video?.median ?? null, audioMs: link.audio?.median ?? null, locked: link.lockedVideo > 0.8 || link.lockedAudio > 0.8 } : null,
+    fps: meters?.fps ?? 0,
+  };
+  const senderClock = sender?.status.clock ?? null;
+  const myClock = clock.fix ? { offsetMs: clock.fix.offsetMs, uncertaintyMs: clock.fix.uncertaintyMs } : null;
+  const lined = clocksLinedUp(senderClock, myClock);
 
   const hint = useMemo(() => {
     void tick;
@@ -171,6 +237,7 @@ export default function ReceiveApp() {
     if (counts.flashes > 0 && counts.beeps === 0) return { tone: "warn", text: "Seeing the flash but not hearing the beep. Turn the sender's volume up, tick “Beeps here” on the sender, move the microphone closer, or raise the sound sensitivity." };
     if (counts.beeps > 0 && counts.flashes === 0) return { tone: "warn", text: "Hearing the beep but not seeing the flash. Fill the view with the screen (or drag a box around it), dim the room, or raise the picture sensitivity." };
     if (counts.flashes + counts.beeps >= 8 && pairs.length === 0) return { tone: "warn", text: "Both are detected but never close together. Is the sender's flash interval longer than a second, or is the sound coming from a different device with a big delay?" };
+    if (meters && meters.fps > 5 && meters.fps < 45 && sum && sum.n >= 3) return { tone: "info", text: `The camera is running at ${meters.fps.toFixed(0)} fps, so each flash is rounded to a ${(1000 / meters.fps).toFixed(0)} ms frame. More light on the screen's room usually brings a phone back to 60 fps; until then trust the median of many readings, not any single one.` };
     if (sum && !sum.stable && sum.n >= 5) return { tone: "warn", text: "Readings are jumping around. Hold the device steady, keep the screen filling the view, and cut background noise. The spread is shown below." };
     if (sum?.stable) return { tone: "ok", text: "Steady reading." };
     return { tone: "info", text: "Collecting readings…" };
@@ -288,7 +355,7 @@ export default function ReceiveApp() {
             <div className="space-y-3 rounded-xl border border-slate-700 bg-slate-900/80 p-4">
               <div className="text-lg font-bold">Measure how far sound and picture are apart</div>
               <ol className="list-decimal space-y-1 pl-5 text-sm text-slate-300">
-                <li>On the sender, open the <a className="text-sky-300 underline" href="./">Test Pattern Generator</a>, choose <b>Configurations → AV sync check</b>, tick <b>Beeps here</b> and press <b>Fullscreen here</b>.</li>
+                <li>On the sender, open the <a className="text-sky-300 underline" href="./">Test Pattern Generator</a>, choose <b>Configurations → AV sync check</b>, tick <b>Beeps here</b>, press <b>Show QR code on output</b>, then open the output fullscreen. Scan the QR code with this device (that opens this page and pairs the two). Or just open this page directly for a stand-alone reading.</li>
                 <li>On this device, press Start and allow the camera and microphone.</li>
                 <li>Aim the camera at the screen so it fills the view, near enough to hear the speaker. Readings appear after a few flashes.</li>
               </ol>
@@ -312,6 +379,13 @@ export default function ReceiveApp() {
           <div className={running ? "" : "hidden"}>
             <div className="relative overflow-hidden rounded-xl border border-slate-700 bg-black">
               <div ref={stage} className="relative touch-none">
+                <div className="pointer-events-none absolute left-2 top-2 z-20 rounded-md bg-black/70 px-2 py-1 text-xs leading-tight text-white">
+                  <div className="text-base font-bold tabular-nums">{sum ? `${sum.median > 0 ? "+" : ""}${Math.round(sum.median)} ms` : "- ms"} <span className="text-xs font-normal text-slate-300">{sum ? describeOffset(sum.median) : "measuring…"}</span></div>
+                  {link && (link.lockedVideo > 0.8 || link.lockedAudio > 0.8) && link.video && link.audio ? (
+                    <div className="text-slate-200">Link: picture {Math.round(link.video.median)} ms · sound {Math.round(link.audio.median)} ms</div>
+                  ) : null}
+                  <div className={lined.ok ? "text-emerald-300" : "text-amber-300"}>{lined.ok ? "Clocks lined up ✓" : myClock ? "Clock synced" : "Syncing clock…"}</div>
+                </div>
                 <div className="absolute inset-0 z-10 cursor-crosshair" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={() => setDrag(null)}>
                   <div className="pointer-events-none absolute border-2 border-amber-300" style={{ left: `${boxShown.x * 100}%`, top: `${boxShown.y * 100}%`, width: `${boxShown.w * 100}%`, height: `${boxShown.h * 100}%` }} />
                 </div>
@@ -349,6 +423,7 @@ export default function ReceiveApp() {
                 <div className="text-lg font-semibold text-sky-200">{describeOffset(sum.median)}</div>
                 <div className="mt-1 text-sm text-slate-400">
                   ≈ {(sum.median / (1000 / fpsNum)).toFixed(1)} frames at {fpsNum} fps · median of the last {sum.n}
+                  {sum.rejected ? ` (${sum.rejected} stray reading${sum.rejected === 1 ? "" : "s"} ignored)` : ""}
                 </div>
                 <dl className="mt-3 grid grid-cols-4 gap-2 text-center text-xs">
                   {[
@@ -380,6 +455,55 @@ export default function ReceiveApp() {
             </div>
           </div>
 
+          <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-900/80 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Link delay</div>
+              <SmallButton onClick={() => void syncClock()} disabled={clock.state === "syncing"}>{clock.state === "syncing" ? `Syncing clock… ${Math.round(clock.progress * 100)}%` : "Sync clock"}</SmallButton>
+            </div>
+            <div className="text-xs text-slate-400">
+              How long the picture and the sound take to get from the sender to here. Needs the sender set to <b>Lock to world time</b> (Output section), so it flashes exactly on each second of real time.
+              {clock.fix
+                ? ` This device's clock is ${clock.fix.offsetMs > 0 ? "behind" : "ahead of"} world time by ${Math.abs(Math.round(clock.fix.offsetMs))} ms (known to ±${Math.round(clock.fix.uncertaintyMs)} ms) and is corrected for.`
+                : clock.state === "failed"
+                  ? " Couldn't reach the time server, so link delay is unavailable (the sync result above doesn't need it)."
+                  : ""}
+            </div>
+            <div className="space-y-0.5 rounded-lg border border-slate-700 bg-slate-950/60 p-2 text-xs">
+              <div className={session ? (relayUp && sender ? "text-emerald-200" : "text-slate-300") : "text-slate-400"}>
+                {session ? (sender ? "Paired with the sender ✓" : relayUp ? "Opened from the sender's QR code - waiting to hear from it…" : "Connecting to the sender…") : "Not paired. Scan the QR code on the sender's output to share readings with it."}
+              </div>
+              <div className={myClock ? "text-emerald-200" : "text-slate-300"}>This device's clock: {clock.state === "syncing" ? `syncing… ${Math.round(clock.progress * 100)}%` : clockText(myClock)}</div>
+              {session ? <div className={senderClock ? "text-emerald-200" : "text-amber-200"}>Sender's clock: {sender ? clockText(senderClock) : "waiting…"}</div> : null}
+              {session || senderClock ? <div className={lined.ok ? "font-semibold text-emerald-200" : "text-amber-200"}>{lined.ok ? "✓ " : ""}{lined.text}</div> : null}
+            </div>
+            {link && (link.lockedVideo > 0.8 || link.lockedAudio > 0.8) ? (
+              <div className="grid grid-cols-3 gap-2 text-center">
+                {[
+                  ["Picture", link.video?.median, link.video],
+                  ["Sound", link.audio?.median, link.audio],
+                  ["Difference", link.video && link.audio ? link.video.median - link.audio.median : undefined, null],
+                ].map(([k, v, sm]) => (
+                  <div key={k as string} className="rounded-md bg-slate-800/70 p-2">
+                    <div className="text-[11px] text-slate-400">{k as string}</div>
+                    <div className="text-xl font-bold tabular-nums">{typeof v === "number" ? `${Math.round(v)} ms` : "-"}</div>
+                    {sm ? <div className="text-[10px] text-slate-500">±{Math.round((sm as { sd: number }).sd)} spread · {(sm as { n: number }).n} readings</div> : <div className="text-[10px] text-slate-500">picture − sound</div>}
+                  </div>
+                ))}
+              </div>
+            ) : link ? (
+              <div className="rounded-lg border border-amber-400/70 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                The flashes don't land on whole seconds of world time, so the sender isn't locked. On the sender press <b>Lock to world time</b> in the Output section (it takes about 10 seconds), then wait for a few flashes.
+              </div>
+            ) : (
+              <div className="text-xs text-slate-500">{running ? "Waiting for a few flashes…" : "Start the camera first."}</div>
+            )}
+            {link && link.video && clock.fix ? (
+              <div className="text-[11px] text-slate-500">
+                Uncertainty from the two clocks: about ±{Math.round(clock.fix.uncertaintyMs + 15)} ms, plus the camera's and microphone's own small delays. Unambiguous up to {Math.round(link.interval / 2)} ms (half the {link.interval / 1000} s the sender flashes at, worked out from the flashes).
+              </div>
+            ) : null}
+          </div>
+
           <Panel title="Settings" defaultOpen={false}>
             <div className="grid gap-2 sm:grid-cols-2">
               <SelectField label="Camera" value={prefs.videoId} onChange={(v) => { patch({ videoId: v }); if (running) void start(v, prefs.audioId); }}>
@@ -408,6 +532,7 @@ export default function ReceiveApp() {
             <div className="grid gap-2 sm:grid-cols-3">
               <NumField label="Delay to take off (ms)" value={prefs.compensationMs} integer={false} step={1} min={-500} max={500} onCommit={(v) => patch({ compensationMs: v })} title="Subtracted from every reading, to cancel a known delay in this device's camera or microphone" />
               <NumField label="Readings averaged" value={prefs.window} integer min={3} max={100} onCommit={(v) => patch({ window: v })} />
+              <NumField label="Sender flash length (ms)" value={prefs.eventMs} integer={false} step={1} min={1} max={500} onCommit={(v) => patch({ eventMs: v })} title="How long the sender's flash and beep last: its Flash length in frames, divided by its frame rate (2 frames at 60 fps = 33 ms). Only used for the link-delay reading." />
               <SelectField label="Show frames at" value={prefs.fps} onChange={(v) => patch({ fps: v })}>
                 {["24", "25", "30", "50", "60"].map((f) => (
                   <option key={f} value={f}>{f} fps</option>
