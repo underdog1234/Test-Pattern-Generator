@@ -43,7 +43,14 @@ export type PairingView = {
   receiver: ReceiverStatus | null;
   /** When the receiver was last heard from (Date.now()), or null. */
   receiverSeenAt: number | null;
+  /** The connection QR code is on show (it goes after two minutes, when the receiver connects, or when closed). */
+  qrOpen: boolean;
+  /** When the QR code goes by itself (Date.now()), or null. */
+  qrUntil: number | null;
 };
+
+/** How long the connection QR code stays up. */
+export const QR_SHOW_MS = 120000;
 
 export const newSessionId = (): string => {
   const bytes = new Uint8Array(10);
@@ -171,4 +178,31 @@ export const overlayLines = (v: PairingView, now: number = Date.now()): Array<{ 
   lines.push({ text: `Receiver clock: ${r?.clock ? clockText(r.clock) : "not synced"}`, tone: r?.clock ? "ok" : "warn" });
   lines.push({ text: l.text, tone: l.ok ? "ok" : "warn" });
   return lines;
+};
+
+// --- the short status the sender shows (top right of the output and in the admin panel) -------------
+
+export type StatusRow = { kind: "ok" | "warn" | "wait" | "off"; text: string; label: string };
+
+/** A few short rows, each with a mark and the full wording for screen readers. */
+export const statusRows = (v: PairingView, now: number = Date.now()): StatusRow[] => {
+  const r = v.receiver;
+  const rows: StatusRow[] = [];
+  const age = v.receiverSeenAt === null ? null : now - v.receiverSeenAt;
+  if (!v.joined) rows.push({ kind: "wait", text: "Waiting for receiver", label: "Waiting for the receiver to connect" });
+  else if (age !== null && age > 20000) rows.push({ kind: "warn", text: `Receiver quiet ${Math.round(age / 1000)} s`, label: `The receiver has not reported for ${Math.round(age / 1000)} seconds` });
+  else rows.push({ kind: "ok", text: "Receiver connected", label: "The receiver is connected" });
+  if (v.joined) {
+    if (r?.av) {
+      const ms = Math.round(r.av.medianMs);
+      rows.push({ kind: r.av.stable ? "ok" : "wait", text: `A/V ${ms > 0 ? "+" : ""}${ms} ms`, label: `Sound versus picture: ${describeOffset(r.av.medianMs)}, ${ms} milliseconds, ${r.av.n} readings` });
+    } else rows.push({ kind: "wait", text: r?.running ? "Measuring…" : "Receiver camera off", label: r?.running ? "The receiver is measuring" : "Waiting for the receiver's camera" });
+    if (r?.link && r.link.locked && r.link.videoMs !== null && r.link.audioMs !== null)
+      rows.push({ kind: "ok", text: `Delay ${Math.round(r.link.videoMs)} / ${Math.round(r.link.audioMs)} ms`, label: `Link delay: picture ${Math.round(r.link.videoMs)} milliseconds, sound ${Math.round(r.link.audioMs)} milliseconds` });
+  }
+  const mine = v.senderClock;
+  const theirs = r?.clock ?? null;
+  rows.push(mine ? { kind: "ok", text: `Sender clock ±${Math.round(mine.uncertaintyMs)} ms`, label: `Sender clock synced to world time within ${Math.round(mine.uncertaintyMs)} milliseconds` } : { kind: "wait", text: "Syncing sender clock", label: "Syncing the sender clock to world time" });
+  if (v.joined) rows.push(theirs ? { kind: "ok", text: `Receiver clock ±${Math.round(theirs.uncertaintyMs)} ms`, label: `Receiver clock synced to world time within ${Math.round(theirs.uncertaintyMs)} milliseconds` } : { kind: "wait", text: "Syncing receiver clock", label: "Waiting for the receiver clock to sync" });
+  return rows;
 };

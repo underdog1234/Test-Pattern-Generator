@@ -42,7 +42,7 @@ import {
 import { frameEpochMs } from "./frameClock";
 import OutputPanel from "./OutputPanel";
 import { measureWorldClock } from "../shared/worldClock";
-import { PairLink, newSessionId, receiveUrl, type PairingView, type ReceiverStatus } from "../shared/pairing";
+import { PairLink, QR_SHOW_MS, newSessionId, receiveUrl, type PairingView, type ReceiverStatus } from "../shared/pairing";
 import OutputView from "./OutputView";
 import { BUILT_IN_PLAYLISTS, buildBuiltInPlaylist } from "./presets";
 import { ArrangePanel, CanvasSettings, Inspector, PlaylistPanel, ScreenList, type AlignRef } from "./panels";
@@ -180,15 +180,17 @@ export default function GeneratorApp() {
       channel.onmessage = (e) => {
         const msg = e.data as OutputRequest | undefined;
         if (msg?.type === "display") patchDisplay(msg.patch);
+        else if (msg?.type === "closeQr") closeQr();
         else if (msg?.type === "status") setOutputStatus({ fullscreen: msg.fullscreen, oneToOne: msg.oneToOne, at: Date.now() });
       };
     }
     return () => channel?.close();
   }, []);
-  // Pairing with a Receive page on another device: its QR code, and what it reports back.
-  const [pair, setPair] = useState<{ id: string; url: string; joined: boolean; receiver: ReceiverStatus | null; seenAt: number | null } | null>(null);
+  // An AV Sync Test session: pairing with the receiver on another device - its QR code, and what it reports back.
+  const [pair, setPair] = useState<{ id: string; url: string; joined: boolean; receiver: ReceiverStatus | null; seenAt: number | null; qrUntil: number | null } | null>(null);
+  const closeQr = useCallback(() => setPair((p) => (p ? { ...p, qrUntil: null } : p)), []);
   const pairingView = useMemo<PairingView | null>(
-    () => (pair ? { url: pair.url, joined: pair.joined, senderClock: playback.world ?? null, receiver: pair.receiver, receiverSeenAt: pair.seenAt } : null),
+    () => (pair ? { url: pair.url, joined: pair.joined, senderClock: playback.world ?? null, receiver: pair.receiver, receiverSeenAt: pair.seenAt, qrOpen: pair.qrUntil !== null, qrUntil: pair.qrUntil } : null),
     [pair, playback.world],
   );
   const pairLink = useRef<PairLink | null>(null);
@@ -452,7 +454,7 @@ export default function GeneratorApp() {
     flash(`Loaded the "${def.name}" playlist (${steps.length} steps). Press Play playlist to run it.`);
   };
 
-  // Lock the pattern clock to world time (for the Receive page's link-delay reading).
+  // Lock the pattern clock to world time (for the AV Sync Test link-delay reading).
   const [worldSync, setWorldSync] = useState<{ busy: boolean; progress: number; failed: boolean }>({ busy: false, progress: 0, failed: false });
   const lockWorld = async () => {
     setWorldSync({ busy: true, progress: 0, failed: false });
@@ -469,7 +471,7 @@ export default function GeneratorApp() {
   const startPairing = () => {
     pairLink.current?.stop();
     const id = newSessionId();
-    setPair({ id, url: receiveUrl(id), joined: false, receiver: null, seenAt: null });
+    setPair({ id, url: receiveUrl(id), joined: false, receiver: null, seenAt: null, qrUntil: Date.now() + QR_SHOW_MS });
     const link = new PairLink(id, "sender", (m) => {
       if (m.role === "receiver") setPair((p) => (p && p.id === id ? { ...p, joined: true, receiver: m, seenAt: Date.now() } : p));
     });
@@ -484,6 +486,13 @@ export default function GeneratorApp() {
     setPair(null);
   };
   useEffect(() => () => pairLink.current?.stop(), []);
+  // The QR code takes itself down after two minutes.
+  useEffect(() => {
+    if (!pair || pair.qrUntil === null) return;
+    const id = window.setTimeout(closeQr, Math.max(0, pair.qrUntil - Date.now()));
+    return () => window.clearTimeout(id);
+  }, [pair?.qrUntil, pair?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const showQr = () => setPair((p) => (p ? { ...p, qrUntil: Date.now() + QR_SHOW_MS } : p));
   // Tell the receiver how this clock stands, now and every few seconds.
   useEffect(() => {
     const link = pairLink.current;
@@ -610,45 +619,12 @@ export default function GeneratorApp() {
         <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, false); e.target.value = ""; }} />
         <span className="mx-1 h-5 w-px bg-slate-700" />
         <SmallButton tone="primary" onClick={() => setShowExport(true)} title="Save images, a PDF or a video of the patterns">Download…</SmallButton>
-        <a className="ml-auto text-xs font-semibold text-sky-300 hover:underline" href="./receive.html" target="_blank" rel="noopener" title="Measure audio / video sync with this device's camera and microphone">Receive ↗</a>
+        <a className="ml-auto text-xs font-semibold text-sky-300 hover:underline" href="./receive.html" target="_blank" rel="noopener" title="Open the AV Sync Test receiver: measure audio / video sync with this device's camera and microphone">AV Sync Test ↗</a>
         <a className="text-xs text-sky-300 hover:underline" href="https://script.google.com/macros/s/AKfycbwsrCoqVwHdQHYPUDIDGv64vjwTF4DfAngFZ0KwUWANx6ZaL2EmRquxgYRIWcQYSCS4/exec" target="_blank" rel="noopener noreferrer">MMS Links ↗</a>
       </header>
 
-      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_380px]">
-        <main className="min-w-0 space-y-3">
-          <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="w-20 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Playback</span>
-              <SmallButton active={playback.playing} onClick={() => setPlaying(true)} title="Play (Space toggles)">▶ Play</SmallButton>
-              <SmallButton active={!playback.playing} onClick={() => setPlaying(false)} title="Pause (Space toggles)">❚❚ Pause</SmallButton>
-              <SmallButton onClick={restart} title="Back to the start of the loop">⏮ Restart</SmallButton>
-              <span className="font-mono text-xs text-slate-300">
-                {(currentTime % config.loopSeconds).toFixed(1)}s / {config.loopSeconds}s loop
-              </span>
-              <span className="mx-1 h-5 w-px bg-slate-700" />
-              <Check
-                checked={config.autoCycle.enabled}
-                onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, enabled: v } }))}
-                title="Step every screen through all the test patterns in turn (a running playlist takes over while it plays)"
-              >
-                Auto cycle all patterns
-              </Check>
-              {config.autoCycle.enabled ? (
-                <>
-                  <span className="text-xs text-slate-400">change every</span>
-                  <NumField className="w-16" value={config.autoCycle.seconds} min={1} max={3600} title="Seconds each pattern stays up" onCommit={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, seconds: v } }))} />
-                  <span className="text-xs text-slate-400">seconds</span>
-                  <Check checked={config.autoCycle.stagger} onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, stagger: v } }))} title="Each screen starts one pattern further on, so they all show something different">
-                    Different per screen
-                  </Check>
-                </>
-              ) : null}
-              {playback.playlist.active && activeStep !== null ? (
-                <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Playlist: {config.playlist[activeStep]?.name}</span>
-              ) : null}
-              <span className="ml-auto text-xs text-slate-400">{selectedIds.length ? `${selectedIds.length} selected` : "Nothing selected"}</span>
-            </div>
-          </div>
+      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,34rem)_minmax(0,1fr)]">
+        <aside className="order-2 min-w-0 space-y-2 xl:order-1 xl:sticky xl:top-16 xl:max-h-[calc(100vh-5rem)] xl:self-start xl:overflow-y-auto xl:pr-1">
           <OutputPanel
             config={config}
             target={outputTarget}
@@ -666,40 +642,9 @@ export default function GeneratorApp() {
             pairing={pairingView}
             onStartPairing={startPairing}
             onStopPairing={stopPairing}
+            onCloseQr={closeQr}
+            onShowQr={showQr}
           />
-          <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
-            <CanvasEditor
-              config={config}
-              frameSource={frameSource}
-              selectedIds={selectedIds}
-              onSelect={setSelectedIds}
-              onBeginEdit={beginEdit}
-              onRects={setRects}
-              maxHeight={editorMaxHeight}
-              paused={!!inlineOutput}
-            />
-          </div>
-          {warnings.length ? (
-            <div className="rounded-lg border border-amber-400/70 bg-amber-500/10 p-2 text-xs text-amber-200">
-              {warnings.map((w, i) => (
-                <div key={i}>⚠ {w}</div>
-              ))}
-            </div>
-          ) : null}
-          <div className="grid gap-3 lg:grid-cols-2">
-            <CanvasSettings
-              config={config}
-              update={(fn) => update(fn)}
-              onSavePreset={savePreset}
-              onDeletePreset={deletePreset}
-              warnings={[]}
-              hasSelection={selectedIds.length > 0}
-              onLedApply={applyLed}
-            />
-          </div>
-        </main>
-
-        <aside className="space-y-3">
           <ScreenList
             config={config}
             selectedIds={selectedIds}
@@ -718,6 +663,7 @@ export default function GeneratorApp() {
               selectionCount={selectedIds.length}
               onPatch={(patch) => patchScreen(primary.id, patch)}
               onLoopSeconds={(seconds) => update((c) => ({ ...c, loopSeconds: seconds }))}
+              onRestart={restart}
               onApplyPatternToSelection={() => {
                 const ids = new Set(selectedIds);
                 update((c) => ({
@@ -772,7 +718,71 @@ export default function GeneratorApp() {
             onLoopChange={(v) => setPlayback((p) => ({ ...p, playlist: { ...p.playlist, loop: v } }))}
             onLoadBuiltIn={loadBuiltInPlaylist}
           />
+          <CanvasSettings
+              config={config}
+              update={(fn) => update(fn)}
+              onSavePreset={savePreset}
+              onDeletePreset={deletePreset}
+              warnings={[]}
+              hasSelection={selectedIds.length > 0}
+              onLedApply={applyLed}
+            />
         </aside>
+
+        <main className="order-1 min-w-0 space-y-3 xl:order-2">
+          <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="w-20 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Playback</span>
+              <SmallButton active={playback.playing} onClick={() => setPlaying(true)} title="Play (Space toggles)">▶ Play</SmallButton>
+              <SmallButton active={!playback.playing} onClick={() => setPlaying(false)} title="Pause (Space toggles)">❚❚ Pause</SmallButton>
+              <SmallButton onClick={restart} title="Back to the start of the loop">⏮ Restart</SmallButton>
+              <span className="font-mono text-xs text-slate-300">
+                {(currentTime % config.loopSeconds).toFixed(1)}s / {config.loopSeconds}s loop
+              </span>
+              <span className="mx-1 h-5 w-px bg-slate-700" />
+              <Check
+                checked={config.autoCycle.enabled}
+                onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, enabled: v } }))}
+                title="Step every screen through all the test patterns in turn (a running playlist takes over while it plays)"
+              >
+                Auto cycle all patterns
+              </Check>
+              {config.autoCycle.enabled ? (
+                <>
+                  <span className="text-xs text-slate-400">change every</span>
+                  <NumField className="w-16" value={config.autoCycle.seconds} min={1} max={3600} title="Seconds each pattern stays up" onCommit={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, seconds: v } }))} />
+                  <span className="text-xs text-slate-400">seconds</span>
+                  <Check checked={config.autoCycle.stagger} onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, stagger: v } }))} title="Each screen starts one pattern further on, so they all show something different">
+                    Different per screen
+                  </Check>
+                </>
+              ) : null}
+              {playback.playlist.active && activeStep !== null ? (
+                <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Playlist: {config.playlist[activeStep]?.name}</span>
+              ) : null}
+              <span className="ml-auto text-xs text-slate-400">{selectedIds.length ? `${selectedIds.length} selected` : "Nothing selected"}</span>
+            </div>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
+            <CanvasEditor
+              config={config}
+              frameSource={frameSource}
+              selectedIds={selectedIds}
+              onSelect={setSelectedIds}
+              onBeginEdit={beginEdit}
+              onRects={setRects}
+              maxHeight={editorMaxHeight}
+              paused={!!inlineOutput}
+            />
+          </div>
+          {warnings.length ? (
+            <div className="rounded-lg border border-amber-400/70 bg-amber-500/10 p-2 text-xs text-amber-200">
+              {warnings.map((w, i) => (
+                <div key={i}>⚠ {w}</div>
+              ))}
+            </div>
+          ) : null}
+        </main>
       </div>
 
       {showExport ? <ExportDialog config={config} selectedIds={selectedIds} currentTime={currentTime} onClose={() => setShowExport(false)} /> : null}
@@ -800,6 +810,7 @@ export default function GeneratorApp() {
           stateRef={outputStateRef}
           onDisplay={patchDisplay}
           screenId={inlineOutput.screenId}
+          onCloseQr={closeQr}
           onClose={() => {
             setInlineOutput(null);
             if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});

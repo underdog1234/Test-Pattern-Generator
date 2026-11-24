@@ -9,6 +9,8 @@
 // the one thing it must never do.
 // ---------------------------------------------------------------------------
 
+import { AUDIO_TEST_SECONDS } from "./audioTest";
+
 export type Rect = { x: number; y: number; w: number; h: number };
 
 export type PatternSettings = Record<string, number | string | boolean>;
@@ -291,17 +293,18 @@ export const fourScreenConfig = (): GeneratorConfig =>
     makeScreen(3, { name: "Screen 4", x: 1920, y: 1080, w: 1920, h: 1080, pattern: "faces" }),
   ]);
 
-/** One 1080p screen running the AV sync flash and beep - the sender for the Receive page. */
+/** One 1080p screen running the AV Sync Test - the sender for the AV Sync Test receiver. */
 export const avSyncCheckConfig = (): GeneratorConfig => ({
-  ...baseConfig({ w: 1920, h: 1080 }, [makeScreen(0, { name: "AV sync", x: 0, y: 0, w: 1920, h: 1080, pattern: "av-sync" })]),
-  name: "AV sync check",
+  ...baseConfig({ w: 1920, h: 1080 }, [makeScreen(0, { name: "AV Sync Test", x: 0, y: 0, w: 1920, h: 1080, pattern: "av-sync" })]),
+  name: "AV Sync Test",
 });
 
 /** One 1080p screen running the audio tests. The loop is long enough for the whole walk-through. */
 export const audioTestConfig = (): GeneratorConfig => ({
   ...baseConfig({ w: 1920, h: 1080 }, [makeScreen(0, { name: "Audio tests", x: 0, y: 0, w: 1920, h: 1080, pattern: "audio-test" })]),
   name: "Audio tests",
-  loopSeconds: 40,
+  // Exactly one run through every test, so the loop plays the full list once before repeating.
+  loopSeconds: AUDIO_TEST_SECONDS,
 });
 
 /** One 1080p screen with the speaking face. */
@@ -319,8 +322,8 @@ export type LayoutPreset = { id: string; name: string; description: string; buil
 /** Starting layouts, offered in the Configurations window. */
 export const LAYOUT_PRESETS: LayoutPreset[] = [
   { id: "standard-1080p", name: "Standard 1080p (16:9)", description: "One screen, 1920 × 1080", build: standard1080pConfig },
-  { id: "av-sync-check", name: "AV sync check", description: "One screen flashing and beeping once a second - the sender for the Receive page", build: avSyncCheckConfig },
-  { id: "audio-tests", name: "Audio tests", description: "Left, right, phase and sub bass, announced by a voice - turn sound on in the Output section", build: audioTestConfig },
+  { id: "av-sync-check", name: "AV Sync Test", description: "One screen flashing and beeping once a second. Start the session in the Output section, then scan the QR code with a phone", build: avSyncCheckConfig },
+  { id: "audio-tests", name: "Audio tests", description: "Left, right, stereo sweep, phase, music and frequency sweep, announced by a voice - turn sound on in the Output section", build: audioTestConfig },
   { id: "lip-sync", name: "Lip sync", description: "An illustrated face speaking a passage, to check sound and picture line up", build: lipSyncConfig },
   { id: "four-screens", name: "Four screens on 4K", description: "Four 1920 × 1080 screens on a 3840 × 2160 canvas", build: fourScreenConfig },
   { id: "empty", name: "Empty canvas", description: "3840 × 2160, no screens", build: () => baseConfig(LEGACY_CANVAS, []) },

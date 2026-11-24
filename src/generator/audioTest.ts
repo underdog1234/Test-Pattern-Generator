@@ -1,12 +1,17 @@
 // ---------------------------------------------------------------------------
-// Audio tests: a guided walk through the speakers - left, right, both, in
-// phase, out of phase, then the low end (music with bass, and a sub sweep).
-// The voice says what is being tested while the screen shows it, and the same
-// timeline drives both, so what you see is always what you should be hearing.
+// Audio tests: a guided walk through the speakers - left, right, both, a
+// left-to-right sweep, in phase, out of phase, music with deep bass, and a
+// sweep through the whole range of hearing. A voice says what is being tested
+// while the screen shows it, and the same timeline drives both, so what you see
+// is always what you should be hearing.
+//
+// Each test can be ticked on or off (unticked ones are skipped and hidden), and
+// clicking one in the admin panel holds the output on it until another is
+// chosen or the loop is restarted.
 // ---------------------------------------------------------------------------
 
-import { MUSIC_SECONDS, SWEEP, musicBeat, sweepHz } from "./clips";
-import type { Beep, PatternDef } from "./patterns";
+import { MUSIC_SECONDS, PAN, SWEEP, musicBeat, panPosition, sweepHz } from "./clips";
+import type { Beep, ParamDef, PatternDef } from "./patterns";
 import { FONT, clamp01, fitText, roundRect, wrapLines } from "./textKit";
 
 type Side = "L" | "R";
@@ -18,7 +23,7 @@ type StepEvent = {
   /** The speakers it plays through, and whether the right one is upside down. */
   sides: Side[];
   inverted?: boolean;
-  kind: "voice" | "pulse" | "noise" | "music" | "sweep";
+  kind: "voice" | "pulse" | "noise" | "music" | "sweep" | "pan";
   beep: Omit<Beep, "at" | "gain">;
 };
 
@@ -54,6 +59,14 @@ export const AUDIO_STEPS: AudioStep[] = [
     events: [voice("speech-centre", 1.5, ["L", "R"], "LR"), ...pulses(["L", "R"], "LR")],
   },
   {
+    id: "pan", short: "Left to right", title: "LEFT TO RIGHT SWEEP", seconds: 9,
+    detail: "A tone that glides from the left speaker to the right. It should move smoothly across the middle, with no jumps and no change in loudness.",
+    events: [
+      voice("speech-pan", 2.2, ["L", "R"], "LR"),
+      { at: 2.6, dur: PAN.seconds, sides: ["L", "R"], kind: "pan", beep: { freq: 0, duration: PAN.seconds, clip: "pan-sweep" } },
+    ],
+  },
+  {
     id: "in-phase", short: "In phase", title: "IN PHASE", seconds: 5,
     detail: "The same noise in both speakers. It should sound solid and focused in the middle, with full bass.",
     events: [
@@ -70,38 +83,81 @@ export const AUDIO_STEPS: AudioStep[] = [
     ],
   },
   {
-    id: "sub", short: "Sub bass", title: "SUB BASS", seconds: 10,
+    id: "music", short: "Music", title: "MUSIC TEST", seconds: 10,
     detail: "Music with a deep kick and bass line. You should feel the low end, not just hear it. If it sounds thin, check the subwoofer.",
     events: [
-      voice("speech-sub", 1.8, ["L", "R"], "LR"),
-      { at: 2, dur: MUSIC_SECONDS, sides: ["L", "R"], kind: "music", beep: { freq: 0, duration: MUSIC_SECONDS, clip: "sub-music" } },
+      voice("speech-music", 2, ["L", "R"], "LR"),
+      { at: 2.2, dur: MUSIC_SECONDS, sides: ["L", "R"], kind: "music", beep: { freq: 0, duration: MUSIC_SECONDS, clip: "sub-music" } },
     ],
   },
   {
-    id: "sweep", short: "Sweep", title: "SUB SWEEP", seconds: 5,
-    detail: "A slow tone rising from 20 Hz to 120 Hz. Note where it first becomes audible and where it gets loudest; gaps or rattles point to the room or the speaker.",
-    events: [{ at: 0.5, dur: SWEEP.seconds, sides: ["L", "R"], kind: "sweep", beep: { freq: 0, duration: SWEEP.seconds, clip: "sub-sweep" } }],
+    id: "sweep", short: "Sweep", title: "FREQUENCY SWEEP", seconds: 13,
+    detail: "A slow tone rising from 20 Hz to 20 kHz. Note where it first becomes audible and where it fades out at the top; gaps, rattles or buzzes point to the room or the speaker.",
+    events: [
+      voice("speech-sweep", 2.2, ["L", "R"], "LR"),
+      { at: 2.6, dur: SWEEP.seconds, sides: ["L", "R"], kind: "sweep", beep: { freq: 0, duration: SWEEP.seconds, clip: "sub-sweep" } },
+    ],
   },
 ];
 
+/** The length of one run through every test. */
 export const AUDIO_TEST_SECONDS = AUDIO_STEPS.reduce((n, s) => n + s.seconds, 0);
 
-const STARTS = AUDIO_STEPS.reduce<number[]>((acc, s, i) => [...acc, i === 0 ? 0 : acc[i - 1] + AUDIO_STEPS[i - 1].seconds], []);
+type Settings = Record<string, number | string | boolean>;
+
+/** The setting that switches a test on or off, e.g. "on_in_phase". */
+export const audioStepKey = (id: string) => `on_${id.replace(/-/g, "_")}`;
+
+/** The settings behind the tick boxes and the hold. They are edited in the audio test list, not as plain controls. */
+export const AUDIO_TEST_PARAMS: ParamDef[] = [
+  { key: "volume", label: "Volume", type: "number", min: 5, max: 100, step: 5, default: 60 },
+  { key: "voice", label: "Voice announces each test", type: "boolean", default: true },
+  ...AUDIO_STEPS.map((st): ParamDef => ({ key: audioStepKey(st.id), label: st.short, type: "boolean", default: true, hidden: true })),
+  { key: "hold", label: "Held test", type: "select", options: [{ value: "", label: "None" }, ...AUDIO_STEPS.map((st) => ({ value: st.id, label: st.short }))], default: "", hidden: true },
+];
+
+/** What is playing: the ticked tests in order (or just the held one), laid out on the loop. */
+export type AudioPlan = {
+  steps: AudioStep[];
+  /** Seconds after the start of a run that each step begins. */
+  starts: number[];
+  /** Length of one run of these steps. */
+  total: number;
+  /** How far apart runs begin on the loop. */
+  period: number;
+  copies: number;
+  held: boolean;
+};
+
+export const audioPlan = (s: Settings, loopSeconds: number): AudioPlan => {
+  const heldStep = AUDIO_STEPS.find((st) => st.id === String(s.hold ?? ""));
+  const steps = heldStep ? [heldStep] : AUDIO_STEPS.filter((st) => s[audioStepKey(st.id)] !== false);
+  const starts = steps.reduce<number[]>((acc, _st, i) => [...acc, i === 0 ? 0 : acc[i - 1] + steps[i - 1].seconds], []);
+  const total = steps.reduce((n, st) => n + st.seconds, 0);
+  const copies = total > 0 ? Math.max(1, Math.floor(loopSeconds / total)) : 0;
+  // A held test repeats evenly across the loop, with a short rest between repeats.
+  const period = heldStep && loopSeconds >= total && copies > 0 ? loopSeconds / copies : total;
+  return { steps, starts, total, period, copies, held: !!heldStep };
+};
+
+/** The length of one run through the ticked tests: the loop that plays each of them once. */
+export const enabledSeconds = (s: Settings): number =>
+  AUDIO_STEPS.filter((st) => s[audioStepKey(st.id)] !== false).reduce((n, st) => n + st.seconds, 0);
 
 /** How loud each kind of sound is played, relative to the volume setting. */
-const LEVEL: Record<StepEvent["kind"], number> = { voice: 1, pulse: 0.5, noise: 0.9, music: 0.9, sweep: 0.35 };
+const LEVEL: Record<StepEvent["kind"], number> = { voice: 1, pulse: 0.5, noise: 0.9, music: 0.9, sweep: 0.35, pan: 0.6 };
 
-/** The sounds of the whole test, placed on the loop. Only whole sounds that fit before the loop restarts are used. */
+/** The sounds of the test, placed on the loop. Only whole sounds that fit before the loop restarts are used. */
 export const audioTestBeeps: NonNullable<PatternDef["beeps"]> = (s, loopSeconds) => {
   const volume = Math.max(0.05, Math.min(1, Number(s.volume) / 100));
   const voiceOn = Boolean(s.voice);
+  const plan = audioPlan(s, loopSeconds);
   const out: Beep[] = [];
-  const copies = Math.max(1, Math.floor(loopSeconds / AUDIO_TEST_SECONDS));
-  for (let k = 0; k < copies; k += 1) {
-    AUDIO_STEPS.forEach((step, i) => {
+  for (let k = 0; k < plan.copies; k += 1) {
+    plan.steps.forEach((step, i) => {
       step.events.forEach((e) => {
         if (e.kind === "voice" && !voiceOn) return;
-        const at = k * AUDIO_TEST_SECONDS + STARTS[i] + e.at;
+        const at = k * plan.period + plan.starts[i] + e.at;
         if (at + e.dur > loopSeconds + 1e-6) return;
         out.push({ ...e.beep, at, gain: volume * LEVEL[e.kind] });
       });
@@ -111,6 +167,7 @@ export const audioTestBeeps: NonNullable<PatternDef["beeps"]> = (s, loopSeconds)
 };
 
 export type AudioTestMoment = {
+  /** Index into the plan's steps; -1 when nothing is playing (no tests ticked, or waiting for the loop to restart). */
   stepIndex: number;
   /** Seconds into the step. */
   local: number;
@@ -122,16 +179,17 @@ export type AudioTestMoment = {
   pulsesDone: number;
 };
 
-/** Where the loop is in the test; stepIndex is -1 after the last whole run, while waiting for the loop to restart. */
-export const audioTestMoment = (loopTime: number, loopSeconds: number): AudioTestMoment => {
-  const copies = Math.max(1, Math.floor(loopSeconds / AUDIO_TEST_SECONDS));
-  if (loopTime >= copies * AUDIO_TEST_SECONDS) return { stepIndex: -1, local: 0, live: [], pulse: -1, pulsesDone: 0 };
-  const t = loopTime % AUDIO_TEST_SECONDS;
-  let i = AUDIO_STEPS.length - 1;
-  while (i > 0 && t < STARTS[i]) i -= 1;
-  const local = t - STARTS[i];
-  const live = AUDIO_STEPS[i].events.filter((e) => local >= e.at && local < e.at + e.dur);
-  const ps = AUDIO_STEPS[i].events.filter((e) => e.kind === "pulse");
+/** Where the loop is in the test. */
+export const audioTestMoment = (plan: AudioPlan, loopTime: number): AudioTestMoment => {
+  const none = { stepIndex: -1, local: 0, live: [], pulse: -1, pulsesDone: 0 };
+  if (!plan.steps.length || loopTime >= plan.copies * plan.period - 1e-9) return none;
+  const t = loopTime % plan.period;
+  let i = plan.steps.length - 1;
+  while (i > 0 && t < plan.starts[i]) i -= 1;
+  const local = t - plan.starts[i];
+  const step = plan.steps[i];
+  const live = step.events.filter((e) => local >= e.at && local < e.at + e.dur);
+  const ps = step.events.filter((e) => e.kind === "pulse");
   const pulse = ps.findIndex((e) => local >= e.at && local < e.at + e.dur);
   return { stepIndex: i, local, live, pulse, pulsesDone: ps.filter((e) => local >= e.at).length };
 };
@@ -213,9 +271,14 @@ const scope = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h
   ctx.restore();
 };
 
+/** "440 Hz", "2.5 kHz". */
+const hzText = (hz: number) => (hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 2)} kHz` : `${Math.round(hz)} Hz`);
+
 export const drawAudioTest: PatternDef["draw"] = (ctx, w, h, s, info) => {
-  const m = audioTestMoment(info.loopTime, info.loopSeconds);
-  const step = m.stepIndex >= 0 ? AUDIO_STEPS[m.stepIndex] : null;
+  const plan = audioPlan(s, info.loopSeconds);
+  const m = audioTestMoment(plan, info.loopTime);
+  const step = m.stepIndex >= 0 ? plan.steps[m.stepIndex] : null;
+  const idle = plan.steps.length === 0;
   ctx.fillStyle = COL.bg;
   ctx.fillRect(0, 0, w, h);
   ctx.textBaseline = "alphabetic";
@@ -225,16 +288,35 @@ export const drawAudioTest: PatternDef["draw"] = (ctx, w, h, s, info) => {
   fitText(ctx, "AUDIO TESTS", w * 0.7, h * 0.1);
   ctx.fillStyle = COL.yellow;
   ctx.fillText("AUDIO TESTS", w / 2, h * 0.115);
-  const sub = step ? `Step ${m.stepIndex + 1} of ${AUDIO_STEPS.length}  ·  ${Math.max(0, Math.ceil(step.seconds - m.local))} s` : "Starting again…";
-  fitText(ctx, sub, w * 0.6, h * 0.04, "normal");
-  ctx.fillStyle = COL.dim;
-  ctx.fillText(sub, w / 2, h * 0.17);
+  if (plan.held && !idle) {
+    const note = "Holding on this test";
+    fitText(ctx, note, w * 0.6, h * 0.04, "normal");
+    ctx.fillStyle = COL.dim;
+    ctx.fillText(note, w / 2, h * 0.17);
+  }
+
+  if (idle) {
+    // Every test is switched off: say so, plainly.
+    const mid = h * 0.45;
+    const big = "NO TESTS SELECTED";
+    fitText(ctx, big, w * 0.8, h * 0.12);
+    ctx.fillStyle = COL.text;
+    ctx.fillText(big, w / 2, mid);
+    const small = "The loop is stopped. Tick a test in the admin panel to start it.";
+    fitText(ctx, small, w * 0.8, h * 0.05, "normal");
+    ctx.fillStyle = COL.dim;
+    ctx.fillText(small, w / 2, mid + h * 0.1);
+    return;
+  }
 
   const top = h * 0.21;
   const boxH = h * 0.4;
   const boxW = Math.min(w * 0.22, boxH * 0.85);
+  const panLive = m.live.find((e) => e.kind === "pan");
+  const panPos = panLive && step ? panPosition(m.local - panLive.at) : -1;
   const live = (side: Side) => {
     if (!step) return 0;
+    if (panPos >= 0) return side === "L" ? Math.cos(panPos * Math.PI / 2) : Math.sin(panPos * Math.PI / 2);
     const sounding = m.live.some((e) => e.sides.includes(side));
     const stepUses = step.events.some((e) => e.sides.includes(side));
     return sounding ? 1 : stepUses ? 0.0001 : 0;
@@ -272,6 +354,31 @@ export const drawAudioTest: PatternDef["draw"] = (ctx, w, h, s, info) => {
           ctx.stroke();
         }
       }
+    } else if (step.id === "pan") {
+      // A dot that travels from the left speaker to the right along a blue-to-red track.
+      const bw = vw * 0.86;
+      const bx = w / 2 - bw / 2;
+      const by = vy + vh * 0.42;
+      const bh = vh * 0.12;
+      const grad = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+      grad.addColorStop(0, COL.blue);
+      grad.addColorStop(1, COL.red);
+      ctx.save();
+      ctx.globalAlpha = 0.45;
+      ctx.fillStyle = grad;
+      roundRect(ctx, bx, by, bw, bh, bh / 2);
+      ctx.fill();
+      ctx.restore();
+      const pos = panPos >= 0 ? panPos : m.local < (panLive?.at ?? step.events.find((e) => e.kind === "pan")!.at) ? 0 : 1;
+      const dotR = vh * 0.15;
+      ctx.beginPath();
+      ctx.arc(bx + bw * pos, by + bh / 2, dotR, 0, Math.PI * 2);
+      ctx.fillStyle = panPos >= 0 ? COL.yellow : "#475569";
+      ctx.fill();
+      const caption = panPos >= 0 ? (Math.abs(panPos - 0.5) < 0.03 ? "CENTRE" : panPos < 0.5 ? `${Math.round((1 - panPos) * 100)}% LEFT` : `${Math.round(panPos * 100)}% RIGHT`) : "LEFT  →  RIGHT";
+      fitText(ctx, "100% RIGHT", vw * 0.5, vh * 0.2, "normal");
+      ctx.fillStyle = COL.dim;
+      ctx.fillText(caption, w / 2, by + bh + vh * 0.42);
     } else if (step.id === "in-phase" || step.id === "out-of-phase") {
       scope(ctx, vx, vy, vw, vh, info.loopTime, step.id === "out-of-phase");
       fitText(ctx, step.id === "in-phase" ? "Left and right move together" : "Right is the mirror image of left", vw, vh * 0.17, "normal");
@@ -279,7 +386,7 @@ export const drawAudioTest: PatternDef["draw"] = (ctx, w, h, s, info) => {
       ctx.textBaseline = "top";
       ctx.fillText(step.id === "in-phase" ? "Left and right move together" : "Right is the mirror image of left", w / 2, vy + vh + h * 0.006);
       ctx.textBaseline = "alphabetic";
-    } else if (step.id === "sub") {
+    } else if (step.id === "music") {
       // A level bar that kicks with the beat of the music.
       const music = step.events.find((e) => e.kind === "music")!;
       const tm = m.local - music.at;
@@ -299,13 +406,13 @@ export const drawAudioTest: PatternDef["draw"] = (ctx, w, h, s, info) => {
       ctx.fillStyle = COL.dim;
       ctx.fillText("KICK + BASS  ·  30 to 100 Hz", w / 2, by + bh + vh * 0.28);
     } else if (step.id === "sweep") {
-      const sweep = step.events[0];
+      const sweep = step.events.find((e) => e.kind === "sweep")!;
       const ts = m.local - sweep.at;
       const on = ts >= 0 && ts < SWEEP.seconds;
       const hz = on ? sweepHz(ts) : 0;
-      fitText(ctx, "000 Hz", vw * 0.6, vh * 0.55);
+      fitText(ctx, "00.0 kHz", vw * 0.6, vh * 0.55);
       ctx.fillStyle = on ? COL.yellow : COL.dim;
-      ctx.fillText(on ? `${Math.round(hz)} Hz` : "—", w / 2, vy + vh * 0.5);
+      ctx.fillText(on ? hzText(hz) : "—", w / 2, vy + vh * 0.5);
       const bw = vw * 0.84;
       const bx = w / 2 - bw / 2;
       const by = vy + vh * 0.72;
@@ -318,12 +425,12 @@ export const drawAudioTest: PatternDef["draw"] = (ctx, w, h, s, info) => {
         ctx.arc(bx + bw * clamp01(ts / SWEEP.seconds), by + vh * 0.05, vh * 0.08, 0, Math.PI * 2);
         ctx.fill();
       }
-      fitText(ctx, "20 Hz", bw * 0.2, vh * 0.12, "normal");
+      fitText(ctx, "20 kHz", bw * 0.2, vh * 0.12, "normal");
       ctx.fillStyle = COL.dim;
       ctx.textAlign = "left";
       ctx.fillText("20 Hz", bx, by + vh * 0.28);
       ctx.textAlign = "right";
-      ctx.fillText("120 Hz", bx + bw, by + vh * 0.28);
+      ctx.fillText("20 kHz", bx + bw, by + vh * 0.28);
       ctx.textAlign = "center";
     }
   }
@@ -334,39 +441,40 @@ export const drawAudioTest: PatternDef["draw"] = (ctx, w, h, s, info) => {
   ctx.font = `${textPx}px ${FONT}`;
   ctx.textAlign = "center";
   ctx.fillStyle = COL.text;
-  const lines = step ? wrapLines(ctx, step.detail, w * 0.8) : ["The test starts again with the left speaker."];
+  const lines = step ? wrapLines(ctx, step.detail, w * 0.8) : ["The test starts again."];
   lines.forEach((l, i) => ctx.fillText(l, w / 2, textTop + textPx * 1.25 * (i + 1)));
 
-  // The steps along the bottom.
-  const chipsY = h * 0.88;
+  // The ticked tests along the bottom (a held test is shown even if its box is unticked).
+  const heldId = plan.held ? plan.steps[0].id : "";
+  const shown = AUDIO_STEPS.filter((st) => s[audioStepKey(st.id)] !== false || st.id === heldId);
+  const chipsY = h * 0.9;
   const chipH = h * 0.07;
   const gap = w * 0.008;
-  const chipW = (w * 0.9 - gap * (AUDIO_STEPS.length - 1)) / AUDIO_STEPS.length;
-  AUDIO_STEPS.forEach((st, i) => {
+  const chipW = (w * 0.9 - gap * (shown.length - 1)) / shown.length;
+  shown.forEach((st, i) => {
     const x = w * 0.05 + i * (chipW + gap);
-    const active = i === m.stepIndex;
+    const active = step?.id === st.id;
     roundRect(ctx, x, chipsY, chipW, chipH, chipH * 0.3);
     ctx.fillStyle = active ? "#26304f" : COL.panel;
     ctx.fill();
-    if (active) {
+    if (active && !plan.held) {
       ctx.save();
       roundRect(ctx, x, chipsY, chipW, chipH, chipH * 0.3);
       ctx.clip();
       ctx.fillStyle = COL.purple;
       ctx.fillRect(x, chipsY + chipH * 0.82, chipW * clamp01(m.local / st.seconds), chipH * 0.18);
       ctx.restore();
+    } else if (active) {
+      roundRect(ctx, x, chipsY, chipW, chipH, chipH * 0.3);
+      ctx.lineWidth = Math.max(2, chipH * 0.06);
+      ctx.strokeStyle = COL.purple;
+      ctx.stroke();
     }
     fitText(ctx, st.short, chipW * 0.9, chipH * 0.42);
     ctx.fillStyle = active ? COL.text : COL.dim;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(st.short, x + chipW / 2, chipsY + chipH * 0.42);
+    ctx.fillText(st.short, x + chipW / 2, chipsY + chipH * 0.5);
   });
   ctx.textBaseline = "alphabetic";
-  const foot = "Turn sound on in the Output section · tests stereo left and right, phase and bass";
-  fitText(ctx, foot, w * 0.9, h * 0.026, "normal");
-  ctx.fillStyle = "#64748b";
-  ctx.textAlign = "center";
-  ctx.fillText(foot, w / 2, h * 0.985);
-  void s;
 };

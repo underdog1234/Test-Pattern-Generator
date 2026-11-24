@@ -132,7 +132,7 @@ export const saveDisplayPrefs = (d: OutputDisplay) => write(DISPLAY_KEY, { logo:
 export type OutputState = { config: GeneratorConfig; playback: Playback; display: OutputDisplay; /** QR code and receiver status, while a receiver is being paired. */ pairing?: PairingView | null };
 
 /** What an output window sends back: a change to the display settings. */
-export type OutputRequest = { type: "display"; patch: Partial<OutputDisplay> } | { type: "status"; fullscreen: boolean; oneToOne: boolean };
+export type OutputRequest = { type: "display"; patch: Partial<OutputDisplay> } | { type: "status"; fullscreen: boolean; oneToOne: boolean } | { type: "closeQr" };
 
 export const publishOutputState = (state: OutputState, channel: BroadcastChannel | null) => {
   write(OUTPUT_KEY, state);

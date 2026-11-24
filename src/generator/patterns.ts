@@ -15,14 +15,18 @@
 import type { LedGrid, PatternSettings } from "./model";
 import { drawFaces } from "./faces";
 import { drawPhotoFaces } from "./photoFaces";
-import { AUDIO_TEST_SECONDS, audioTestBeeps, drawAudioTest } from "./audioTest";
+import { AUDIO_TEST_PARAMS, AUDIO_TEST_SECONDS, audioTestBeeps, drawAudioTest } from "./audioTest";
 import { LIPSYNC_MIN_LOOP, drawLipSync, lipSyncBeeps } from "./lipSync";
 
-export type ParamDef =
+export type ParamDef = (
   | { key: string; label: string; type: "number"; min: number; max: number; step?: number; default: number }
   | { key: string; label: string; type: "color"; default: string }
   | { key: string; label: string; type: "boolean"; default: boolean }
-  | { key: string; label: string; type: "select"; options: Array<{ value: string; label: string }>; default: string };
+  | { key: string; label: string; type: "select"; options: Array<{ value: string; label: string }>; default: string }
+) & {
+  /** Kept in the settings but not shown as a plain control (the pattern has its own editor for it). */
+  hidden?: boolean;
+};
 
 export type PatternInfo = {
   /** 0..1 through one loop. */
@@ -699,7 +703,7 @@ const drawAvSync: PatternDef["draw"] = (ctx, w, h, s, info) => {
   ctx.font = `bold ${small}px ${fontFamily}`;
   ctx.fillStyle = "#71717a";
   ctx.textBaseline = "bottom";
-  ctx.fillText(`AV SYNC · ${t.fps} fps · flash + beep every ${t.interval} s`, w / 2, h - Math.round(minD * 0.03));
+  ctx.fillText(`AV SYNC TEST · ${t.fps} fps · flash + beep every ${t.interval} s`, w / 2, h - Math.round(minD * 0.03));
 };
 
 const avSyncBeeps: NonNullable<PatternDef["beeps"]> = (s, loopSeconds) => {
@@ -933,7 +937,7 @@ export const PATTERNS: PatternDef[] = [
     { key: "fps", label: "Frame rate", type: "select", options: fpsOptions, default: "25" },
     { key: "beep", label: "Beep with the flash", type: "boolean", default: true },
   ], draw: drawTimecode, beeps: (s) => (s.beep ? [{ at: 0, freq: AV_BEEP_HZ, duration: 1 / Math.max(1, Math.round(Number(s.fps))) }] : []) },
-  { id: "av-sync", name: "AV Sync Flash and Beep", category: "Motion", animated: true, params: [
+  { id: "av-sync", name: "AV Sync Test", category: "Motion", animated: true, params: [
     { key: "fps", label: "Frame rate", type: "select", options: fpsOptions, default: "60" },
     { key: "showMs", label: "Show measurements in milliseconds", type: "boolean", default: true },
     { key: "interval", label: "Flash every (s)", type: "number", min: 1, max: 60, default: 1 },
@@ -941,10 +945,7 @@ export const PATTERNS: PatternDef[] = [
     { key: "beep", label: "Beep", type: "boolean", default: true },
     { key: "color", label: "Flash colour", type: "color", default: "#ffffff" },
   ], draw: drawAvSync, beeps: avSyncBeeps },
-  { id: "audio-test", name: "Audio Tests (left, right, phase, sub)", category: "Audio", animated: true, minLoopSeconds: AUDIO_TEST_SECONDS, params: [
-    { key: "volume", label: "Volume", type: "number", min: 5, max: 100, step: 5, default: 60 },
-    { key: "voice", label: "Voice announces each test", type: "boolean", default: true },
-  ], draw: drawAudioTest, beeps: audioTestBeeps },
+  { id: "audio-test", name: "Audio Tests (stereo, phase, music, sweep)", category: "Audio", animated: true, minLoopSeconds: AUDIO_TEST_SECONDS, params: AUDIO_TEST_PARAMS, draw: drawAudioTest, beeps: audioTestBeeps },
   { id: "lip-sync", name: "Lip Sync (speaking face)", category: "Audio", animated: true, minLoopSeconds: LIPSYNC_MIN_LOOP, params: [
     { key: "volume", label: "Volume", type: "number", min: 5, max: 100, step: 5, default: 80 },
     { key: "subtitles", label: "Show the words", type: "boolean", default: true },

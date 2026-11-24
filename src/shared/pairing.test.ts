@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PairLink, clocksLinedUp, newSessionId, overlayLines, receiveUrl, sessionFromUrl, type PairMessage, type PairingView } from "./pairing";
+import { PairLink, clocksLinedUp, newSessionId, overlayLines, receiveUrl, sessionFromUrl, statusRows, type PairMessage, type PairingView } from "./pairing";
 
 describe("session ids and urls", () => {
   it("makes long random ids that survive a round trip through the QR address", () => {
@@ -86,6 +86,8 @@ describe("what the sending screen says", () => {
     senderClock: { offsetMs: 743, uncertaintyMs: 9 },
     receiver: { role: "receiver", at: 1, running: true, clock: { offsetMs: -40, uncertaintyMs: 14 }, av: { medianMs: 24, sdMs: 3, n: 12, stable: true }, link: { videoMs: 83, audioMs: 61, locked: true }, fps: 60 },
     receiverSeenAt: 98_500,
+    qrOpen: false,
+    qrUntil: null,
     ...over,
   });
 
@@ -101,5 +103,20 @@ describe("what the sending screen says", () => {
     expect(clocksLinedUp({ offsetMs: 0, uncertaintyMs: 5 }, null).ok).toBe(false);
     expect(overlayLines(view({ joined: false }))).toEqual([{ text: "Waiting for the receiver…", tone: "info" }]);
     expect(overlayLines(view({ receiverSeenAt: 55_000 }), 100_000)[0].text).toContain("Receiver quiet for 45 s");
+  });
+});
+
+describe("the short status rows", () => {
+  const base: PairingView = { url: "u", joined: false, senderClock: null, receiver: null, receiverSeenAt: null, qrOpen: true, qrUntil: 1 };
+  it("waits, then reports a connected receiver with short, labelled rows", () => {
+    const waiting = statusRows(base, 100_000);
+    expect(waiting[0]).toMatchObject({ kind: "wait", text: "Waiting for receiver" });
+    const joined = statusRows(
+      { ...base, joined: true, senderClock: { offsetMs: 1, uncertaintyMs: 9 }, receiverSeenAt: 99_000, receiver: { role: "receiver", at: 1, running: true, clock: { offsetMs: 0, uncertaintyMs: 14 }, av: { medianMs: 24, sdMs: 3, n: 12, stable: true }, link: { videoMs: 83, audioMs: 61, locked: true }, fps: 60 } },
+      100_000,
+    );
+    expect(joined.map((r) => r.text)).toEqual(["Receiver connected", "A/V +24 ms", "Delay 83 / 61 ms", "Sender clock ±9 ms", "Receiver clock ±14 ms"]);
+    expect(joined.every((r) => r.label.length > r.text.length - 3)).toBe(true);
+    expect(statusRows({ ...base, joined: true, receiverSeenAt: 70_000 }, 100_000)[0]).toMatchObject({ kind: "warn", text: "Receiver quiet 30 s" });
   });
 });

@@ -2,14 +2,12 @@
 // selected screen, arrange/align tools, canvas settings and the playlist.
 import { BUILT_IN_PLAYLISTS, playlistLength } from "./presets";
 import React, { useState } from "react";
-import { PROCESSOR_MODEL_IDS, PROCESSOR_SPECS } from "../novastar/processorModels";
 import { Check, ColorField, Label, NumField, Panel, SelectField, SmallButton, TextField } from "./controls";
 import {
   LED_PANEL_PRESETS,
   MOTION_DIRECTIONS,
   RESOLUTION_PRESETS,
   aspectLabel,
-  clampDimension,
   resizeWithAspect,
   type AlignMode,
   type ArrangeMode,
@@ -21,6 +19,7 @@ import {
   type ResolutionPreset,
   type SubScreen,
 } from "./model";
+import { AUDIO_STEPS, AUDIO_TEST_SECONDS, audioPlan, audioStepKey, enabledSeconds } from "./audioTest";
 import { LED_LAYOUT_PATTERN_ID, PATTERNS, PATTERN_BY_ID, patternName, resolveSettings, type ParamDef } from "./patterns";
 
 // ---------------------------------------------------------------------------
@@ -137,6 +136,7 @@ export function ScreenList({
   const none = !selectedIds.length;
   return (
     <Panel
+      id="screens"
       title={`Sub-screens (${config.screens.length})`}
       actions={<SmallButton tone="primary" onClick={onAdd} title="Add a sub-screen">+ Add</SmallButton>}
     >
@@ -231,6 +231,98 @@ export function PatternPicker({ value, onChange, allowLedLayout }: { value: stri
 }
 
 // ---------------------------------------------------------------------------
+// The audio test list: a tick box and a button for each test.
+// ---------------------------------------------------------------------------
+
+function AudioTestList({
+  settings,
+  loopSeconds,
+  onSettings,
+  onLoopSeconds,
+  onRestart,
+}: {
+  settings: Record<string, number | string | boolean>;
+  loopSeconds: number;
+  onSettings: (patch: Record<string, number | string | boolean>) => void;
+  onLoopSeconds: (seconds: number) => void;
+  onRestart: () => void;
+}) {
+  const held = String(settings.hold ?? "");
+  const ticked = AUDIO_STEPS.filter((st) => settings[audioStepKey(st.id)] !== false);
+  const total = enabledSeconds(settings);
+  // The loop follows the ticked tests, unless it was set to something else on purpose.
+  const tick = (id: string, on: boolean) => {
+    const next = { ...settings, [audioStepKey(id)]: on };
+    const patch: Record<string, number | string | boolean> = { [audioStepKey(id)]: on };
+    if (!on && held === id) patch.hold = "";
+    onSettings(patch);
+    const fits = Math.abs(loopSeconds - total) < 0.01;
+    const newTotal = enabledSeconds(next);
+    if (fits && newTotal > 0) onLoopSeconds(newTotal);
+  };
+  const setAll = (on: boolean) => {
+    const patch: Record<string, number | string | boolean> = {};
+    AUDIO_STEPS.forEach((st) => (patch[audioStepKey(st.id)] = on));
+    if (!on) patch.hold = "";
+    onSettings(patch);
+    const newTotal = on ? AUDIO_TEST_SECONDS : 0;
+    if (Math.abs(loopSeconds - total) < 0.01 && newTotal > 0) onLoopSeconds(newTotal);
+  };
+  return (
+    <div className="space-y-1.5 rounded-lg border border-slate-700 bg-slate-950/40 p-2">
+      <div className="flex items-center justify-between gap-2">
+        <Label>Audio tests</Label>
+        <div className="flex gap-1">
+          <SmallButton onClick={() => setAll(true)}>All</SmallButton>
+          <SmallButton onClick={() => setAll(false)}>None</SmallButton>
+        </div>
+      </div>
+      <div className="text-[11px] text-slate-400">Tick the tests to run. Click a test to switch the output to it and hold it there.</div>
+      <ul className="space-y-1">
+        {AUDIO_STEPS.map((st) => {
+          const on = settings[audioStepKey(st.id)] !== false;
+          const isHeld = held === st.id;
+          return (
+            <li key={st.id} className={`flex items-center gap-2 rounded-md border px-2 py-1 ${isHeld ? "border-yellow-300 bg-yellow-300/10" : on ? "border-slate-700 bg-slate-800/60" : "border-slate-800 bg-slate-900/40"}`}>
+              <input type="checkbox" className="h-4 w-4 shrink-0 accent-sky-500" checked={on} onChange={(e) => tick(st.id, e.target.checked)} aria-label={`Include ${st.short} in the loop`} />
+              <button
+                type="button"
+                className={`flex min-w-0 flex-1 items-center justify-between gap-2 text-left text-sm ${on ? "text-white" : "text-slate-500"}`}
+                onClick={() => {
+                  onSettings({ hold: st.id, [audioStepKey(st.id)]: true });
+                  onRestart();
+                }}
+                title={`Switch the output to ${st.title.toLowerCase()} now and hold it`}
+                aria-pressed={isHeld}
+              >
+                <span className="truncate">{st.title.charAt(0) + st.title.slice(1).toLowerCase()}</span>
+                <span className="shrink-0 text-[11px] text-slate-400">{isHeld ? "● holding" : `${st.seconds} s`}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="flex flex-wrap items-center gap-2">
+        <SmallButton
+          tone="primary"
+          disabled={!ticked.length}
+          onClick={() => {
+            onSettings({ hold: "" });
+            onRestart();
+          }}
+          title="Stop holding and play every ticked test in turn, from the start"
+        >
+          ▶ Restart loop
+        </SmallButton>
+        <span className="text-[11px] text-slate-400">
+          {!ticked.length ? "No tests ticked - the loop is stopped." : held ? "Holding one test. Restart the loop to go back to all of them." : `${ticked.length} of ${AUDIO_STEPS.length} tests · ${Math.round(total)} s per run`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Inspector for the selected screen.
 // ---------------------------------------------------------------------------
 
@@ -242,6 +334,7 @@ export function Inspector({
   onApplyPatternToSelection,
   onSavePreset,
   onLoopSeconds,
+  onRestart,
 }: {
   config: GeneratorConfig;
   screen: SubScreen;
@@ -250,19 +343,21 @@ export function Inspector({
   onApplyPatternToSelection: () => void;
   onSavePreset: (p: ResolutionPreset) => void;
   onLoopSeconds: (seconds: number) => void;
+  /** Back to the start of the loop. */
+  onRestart: () => void;
 }) {
   const def = PATTERN_BY_ID.get(screen.pattern) ?? PATTERN_BY_ID.get("info")!;
   const settings = resolveSettings(def, screen.settings[def.id]);
   const setSetting = (key: string, v: number | string | boolean) =>
     onPatch({ settings: { ...screen.settings, [def.id]: { ...(screen.settings[def.id] ?? {}), [key]: v } as PatternSettings } });
+  const setSettings = (patch: Record<string, number | string | boolean>) =>
+    onPatch({ settings: { ...screen.settings, [def.id]: { ...(screen.settings[def.id] ?? {}), ...patch } as PatternSettings } });
+  const needLoop = def.id === "audio-test" ? Math.ceil(audioPlan(settings, 1e9).total) : (def.minLoopSeconds ?? 0);
   const W = config.canvas.w;
   const H = config.canvas.h;
   const place = (x: number, y: number) => onPatch({ x: Math.round(x), y: Math.round(y) });
-  const led = screen.led;
-  const [panelPreset, setPanelPreset] = useState("");
-  const spec = config.processor.model ? PROCESSOR_SPECS[config.processor.model] : null;
   return (
-    <Panel title={<span>Screen settings: <span style={{ color: screen.color }}>{screen.name}</span>{selectionCount > 1 ? <span className="text-slate-400"> (+{selectionCount - 1} more selected)</span> : null}</span>}>
+    <Panel id="inspector" title={<span>Screen settings: <span style={{ color: screen.color }}>{screen.name}</span>{selectionCount > 1 ? <span className="text-slate-400"> (+{selectionCount - 1} more selected)</span> : null}</span>}>
       <div className="grid grid-cols-[1fr_auto] items-end gap-2">
         <TextField label="Name" value={screen.name} onCommit={(v) => onPatch({ name: v.trim() || screen.name })} />
         <ColorField value={screen.color} onChange={(v) => onPatch({ color: v })} />
@@ -284,13 +379,13 @@ export function Inspector({
         />
       </div>
 
-      <div className="rounded-lg border border-slate-700 p-2">
+      <Panel title={`Screen position (X ${screen.x}, Y ${screen.y})`} level="sub" id="inspector-position">
         <div className="grid grid-cols-2 gap-2">
           <NumField label="X (px)" value={screen.x} min={-16384} max={32768} disabled={screen.locked} onCommit={(v) => onPatch({ x: v })} />
           <NumField label="Y (px)" value={screen.y} min={-16384} max={32768} disabled={screen.locked} onCommit={(v) => onPatch({ y: v })} />
         </div>
-        <div className="mt-1 text-[11px] text-slate-400">Right {screen.x + screen.w} · Bottom {screen.y + screen.h}</div>
-        <div className="mt-2 flex flex-wrap gap-1">
+        <div className="text-[11px] text-slate-400">Right {screen.x + screen.w} · Bottom {screen.y + screen.h}</div>
+        <div className="flex flex-wrap gap-1">
           <SmallButton disabled={screen.locked} onClick={() => place(0, screen.y)}>⇤ Left</SmallButton>
           <SmallButton disabled={screen.locked} onClick={() => place((W - screen.w) / 2, screen.y)}>Centre H</SmallButton>
           <SmallButton disabled={screen.locked} onClick={() => place(W - screen.w, screen.y)}>Right ⇥</SmallButton>
@@ -299,7 +394,7 @@ export function Inspector({
           <SmallButton disabled={screen.locked} onClick={() => place(screen.x, H - screen.h)}>Bottom ⇣</SmallButton>
           <SmallButton disabled={screen.locked} onClick={() => onPatch({ x: 0, y: 0, w: W, h: H })} title="Fill the whole canvas">Fill canvas</SmallButton>
         </div>
-      </div>
+      </Panel>
 
       <div className="space-y-2 rounded-lg border border-slate-700 p-2">
         <PatternPicker value={screen.pattern} onChange={(id) => onPatch({ pattern: id })} allowLedLayout={!!screen.ledLayout} />
@@ -310,16 +405,17 @@ export function Inspector({
           </div>
         ) : null}
         <div className="grid grid-cols-2 gap-2">
-          {def.params.map((p) => (
+          {def.params.filter((p) => !p.hidden).map((p) => (
             <div key={p.key} className={p.type === "boolean" ? "col-span-2" : ""}>
               <ParamControl def={p} value={settings[p.key]} onChange={(v) => setSetting(p.key, v)} />
             </div>
           ))}
         </div>
-        {def.minLoopSeconds && config.loopSeconds < def.minLoopSeconds ? (
+        {def.id === "audio-test" ? <AudioTestList settings={settings} loopSeconds={config.loopSeconds} onSettings={setSettings} onLoopSeconds={onLoopSeconds} onRestart={onRestart} /> : null}
+        {needLoop && config.loopSeconds < needLoop ? (
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-400 bg-amber-500/15 p-2 text-xs text-amber-200">
-            <span>This test takes {def.minLoopSeconds} s, but the loop is {config.loopSeconds} s, so it is cut short and its sound is left out.</span>
-            <SmallButton onClick={() => onLoopSeconds(def.minLoopSeconds!)}>Set loop to {def.minLoopSeconds} s</SmallButton>
+            <span>This test takes {needLoop} s, but the loop is {config.loopSeconds} s, so it is cut short and its sound is left out.</span>
+            <SmallButton onClick={() => onLoopSeconds(needLoop)}>Set loop to {needLoop} s</SmallButton>
           </div>
         ) : null}
         <div className="grid grid-cols-2 gap-2">
@@ -351,53 +447,6 @@ export function Inspector({
           <Check checked={screen.overlays.clock} onChange={(v) => onPatch({ overlays: { ...screen.overlays, clock: v } })} title="Analogue clock with a seconds hand and the time in digits, top right">Clock</Check>
         </div>
       </div>
-
-      <div className="space-y-2 rounded-lg border border-slate-700 p-2">
-        <Check checked={!!led} onChange={(v) => onPatch({ led: v ? { cols: Math.max(1, Math.round(screen.w / 168)), rows: Math.max(1, Math.round(screen.h / 168)), panelPxW: 168, panelPxH: 168, panelName: LED_PANEL_PRESETS[0].name } : null })}>
-          LED panel grid (optional)
-        </Check>
-        {led ? (
-          <>
-            <SelectField
-              label="Panel"
-              value={panelPreset}
-              onChange={(v) => {
-                setPanelPreset(v);
-                const p = LED_PANEL_PRESETS.find((x) => x.name === v);
-                if (p) onPatch({ led: { ...led, panelPxW: p.pxW, panelPxH: p.pxH, panelName: p.name } });
-              }}
-            >
-              <option value="">{led.panelName ?? "Custom"} - {led.panelPxW} × {led.panelPxH} px</option>
-              {LED_PANEL_PRESETS.map((p) => (
-                <option key={p.name} value={p.name}>{p.name} - {p.pxW} × {p.pxH} px</option>
-              ))}
-            </SelectField>
-            <div className="grid grid-cols-2 gap-2">
-              <NumField label="Columns" value={led.cols} min={1} max={500} onCommit={(v) => onPatch({ led: { ...led, cols: v } })} />
-              <NumField label="Rows" value={led.rows} min={1} max={500} onCommit={(v) => onPatch({ led: { ...led, rows: v } })} />
-              <NumField label="Panel px wide" value={led.panelPxW} min={1} max={4096} onCommit={(v) => onPatch({ led: { ...led, panelPxW: v, panelName: "Custom" } })} />
-              <NumField label="Panel px high" value={led.panelPxH} min={1} max={4096} onCommit={(v) => onPatch({ led: { ...led, panelPxH: v, panelName: "Custom" } })} />
-            </div>
-            <div className="text-xs text-slate-400">
-              {led.cols} × {led.rows} panels = {led.cols * led.panelPxW} × {led.rows * led.panelPxH} px
-              {led.cols * led.panelPxW !== screen.w || led.rows * led.panelPxH !== screen.h ? " - not this screen's resolution yet" : " - matches this screen"}
-            </div>
-            <div className="flex flex-wrap gap-1">
-              <SmallButton disabled={screen.locked} onClick={() => onPatch({ w: clampDimension(led.cols * led.panelPxW), h: clampDimension(led.rows * led.panelPxH) })}>Set resolution from panels</SmallButton>
-              <SmallButton onClick={() => onPatch({ pattern: "led-moving" })}>Use LED Moving Pattern</SmallButton>
-            </div>
-          </>
-        ) : null}
-      </div>
-
-      {spec && config.processor.inputMode === "perEntry" ? (
-        <SelectField label={`${spec.label} input`} value={screen.input === null ? "" : String(screen.input)} onChange={(v) => onPatch({ input: v ? Number(v) : null })}>
-          <option value="">Unassigned</option>
-          {spec.inputs.map((i) => (
-            <option key={i.interfacePk} value={i.interfacePk}>{i.label}</option>
-          ))}
-        </SelectField>
-      ) : null}
     </Panel>
   );
 }
@@ -442,7 +491,7 @@ export function ArrangePanel({
     <SmallButton key={mode} disabled={!n || (activeRef === "selection" && n < 2)} onClick={() => onAlign(mode, activeRef)} title={title}>{label}</SmallButton>
   );
   return (
-    <Panel title={`Align & arrange${n ? ` (${n} selected)` : ""}`}>
+    <Panel id="arrange" title={`Align & arrange${n ? ` (${n} selected)` : ""}`}>
       {!n ? <div className="text-xs text-slate-400">Select one or more sub-screens on the canvas or in the list.</div> : null}
       <SelectField label="Align relative to" value={activeRef} onChange={setRef}>
         <option value="canvas">Main canvas ({config.canvas.w} × {config.canvas.h})</option>
@@ -542,11 +591,9 @@ export function CanvasSettings({
   const ledW = ledCols * pw;
   const ledH = ledRows * ph;
   const ledInfo = { cols: ledCols, rows: ledRows, panelPxW: pw, panelPxH: ph, panelName: useCustom ? "Custom" : ledPanel.name };
-  const proc = config.processor;
-  const spec = proc.model ? PROCESSOR_SPECS[proc.model] : null;
   return (
     <>
-      <Panel title={`Main canvas - ${c.w} × ${c.h}`}>
+      <Panel id="canvas" title={`Main canvas - ${c.w} × ${c.h}`}>
         <TextField label="Output name" value={config.name} onCommit={(v) => update((cfg) => ({ ...cfg, name: v.trim() || cfg.name }))} />
         <ResolutionEditor
           w={c.w}
@@ -582,7 +629,7 @@ export function CanvasSettings({
         ) : null}
       </Panel>
 
-      <Panel title="Snapping" defaultOpen={false}>
+      <Panel id="snapping" title="Snapping">
         <Check checked={config.snap.enabled} onChange={(v) => setSnap({ enabled: v })}>Snap while dragging</Check>
         <div className="grid grid-cols-2 gap-1 pl-5">
           <Check checked={config.snap.canvasEdges} onChange={(v) => setSnap({ canvasEdges: v })}>Canvas edges</Check>
@@ -596,7 +643,7 @@ export function CanvasSettings({
         </div>
       </Panel>
 
-      <Panel title="LED wall resolution calculator" defaultOpen={false}>
+      <Panel id="led-calc" title="LED wall resolution calculator">
         <div className="text-xs text-slate-400">Work out a resolution from panel rows and columns. Optional - every other part of the generator works with plain pixel sizes.</div>
         <SelectField
           label="Panel"
@@ -632,45 +679,6 @@ export function CanvasSettings({
           <SmallButton disabled={!hasSelection} onClick={() => onLedApply("selected", ledW, ledH, ledInfo)}>Set selected screen</SmallButton>
           <SmallButton tone="primary" onClick={() => onLedApply("new", ledW, ledH, ledInfo)}>Add as new screen</SmallButton>
         </div>
-      </Panel>
-
-      <Panel title="Processor inputs" defaultOpen={false}>
-        <SelectField label="NovaStar processor" value={proc.model} onChange={(v) => update((cfg) => ({ ...cfg, processor: { ...cfg.processor, model: v as GeneratorConfig["processor"]["model"] } }))}>
-          <option value="">None</option>
-          {PROCESSOR_MODEL_IDS.map((id) => (
-            <option key={id} value={id}>{PROCESSOR_SPECS[id].label}</option>
-          ))}
-        </SelectField>
-        {spec ? (
-          <>
-            <div className="flex gap-1">
-              <SmallButton active={proc.inputMode === "whole"} onClick={() => update((cfg) => ({ ...cfg, processor: { ...cfg.processor, inputMode: "whole" } }))}>Whole canvas</SmallButton>
-              <SmallButton active={proc.inputMode === "perEntry"} onClick={() => update((cfg) => ({ ...cfg, processor: { ...cfg.processor, inputMode: "perEntry" } }))}>Per sub-screen</SmallButton>
-            </div>
-            {proc.inputMode === "whole" ? (
-              <SelectField label="Canvas input" value={proc.wholeInput === null ? "" : String(proc.wholeInput)} onChange={(v) => update((cfg) => ({ ...cfg, processor: { ...cfg.processor, wholeInput: v ? Number(v) : null } }))}>
-                <option value="">Unassigned</option>
-                {spec.inputs.map((i) => (
-                  <option key={i.interfacePk} value={i.interfacePk}>{i.label}</option>
-                ))}
-              </SelectField>
-            ) : (
-              <div className="space-y-1 text-xs">
-                {config.screens.map((s) => (
-                  <div key={s.id} className="flex justify-between gap-2">
-                    <span className="truncate">{s.name}</span>
-                    <span className="text-slate-400">{spec.inputs.find((i) => i.interfacePk === s.input)?.label ?? "Unassigned"}</span>
-                  </div>
-                ))}
-                <div className="text-slate-500">Set each screen&apos;s input in its inspector.</div>
-              </div>
-            )}
-            <div className="text-xs text-slate-400">
-              Canvas {c.w} × {c.h} of max {spec.maxCanvasWidth} × {spec.maxCanvasHeight}
-              {c.w > spec.maxCanvasWidth || c.h > spec.maxCanvasHeight ? " - too big for this processor" : ""}
-            </div>
-          </>
-        ) : null}
       </Panel>
     </>
   );
@@ -713,7 +721,7 @@ export function PlaylistPanel({
 }) {
   const total = config.playlist.reduce((s, p) => s + p.duration, 0);
   return (
-    <Panel title={`Playlist (${config.playlist.length} steps${total ? `, ${total}s` : ""})`} defaultOpen>
+    <Panel id="playlist" title={`Playlist (${config.playlist.length} steps${total ? `, ${total}s` : ""})`}>
       <div className="space-y-1">
         <div className="text-xs font-semibold text-slate-300">Built-in playlists</div>
         <div className="flex flex-wrap gap-1">

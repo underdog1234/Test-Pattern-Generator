@@ -7,10 +7,11 @@
 import { useEffect, useRef, useState } from "react";
 import { computePixelMappingStatus, watchDevicePixelRatio } from "../testPattern/pixelMapping";
 import { frameEpochMs } from "./frameClock";
-import { overlayLines, type PairingView } from "../shared/pairing";
+import { statusRows } from "../shared/pairing";
+import { StatusLine } from "../shared/StatusIcon";
+import QrCard from "./QrCard";
 import { applyGlitch } from "./glitch";
 import { LOGO_PATH_D, LogoFx } from "./logoFx";
-import { qrCanvas } from "./qr";
 import { defaultDisplay, effectiveConfig, openChannel, playbackTime, readOutputState, type OutputDisplay, type OutputRequest, type OutputState } from "./storage";
 import type { GeneratorConfig, Rect } from "./model";
 import { renderComposite, renderScreen, loadLedModule } from "./render";
@@ -24,6 +25,8 @@ type Props = {
   onClose?: () => void;
   /** Inline only: change the display settings (the separate window asks over the channel instead). */
   onDisplay?: (patch: Partial<OutputDisplay>) => void;
+  /** Inline only: close the connection QR code (the separate window asks over the channel instead). */
+  onCloseQr?: () => void;
 };
 
 // The logo's vector path, built once. Each screen keeps its own LogoFx (colour,
@@ -74,55 +77,7 @@ const logoAreas = (config: GeneratorConfig, screenId: string | null) => {
   return areas;
 };
 
-const TONE_COLOURS = { ok: "#86efac", warn: "#fcd34d", info: "#e2e8f0" } as const;
-
-/** The QR code while waiting for a receiver; then the receiver's readings and both clocks' status. */
-const drawPairing = (ctx: CanvasRenderingContext2D, W: number, H: number, v: PairingView, qr: HTMLCanvasElement | null, now: number) => {
-  const u = Math.min(W, H);
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  if (!v.joined && qr) {
-    const q = Math.round(u * 0.4);
-    const pad = Math.round(u * 0.03);
-    const font = Math.max(14, Math.round(u * 0.032));
-    const boxW = q + pad * 2;
-    const boxH = q + pad * 2 + font * 3.4;
-    const x = Math.round((W - boxW) / 2);
-    const y = Math.round((H - boxH) / 2);
-    ctx.fillStyle = "#0b1220";
-    ctx.fillRect(x, y, boxW, boxH);
-    ctx.fillStyle = "#ffffff";
-    ctx.font = `bold ${font}px Arial, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    ctx.fillText("Scan to open Receive", W / 2, y + pad * 0.7);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(qr, x + pad, y + pad + font * 1.3, q, q);
-    ctx.font = `${Math.round(font * 0.8)}px Arial, sans-serif`;
-    ctx.fillStyle = "#94a3b8";
-    ctx.fillText(v.senderClock ? `This clock: synced to world time ±${Math.round(v.senderClock.uncertaintyMs)} ms · waiting for the receiver…` : "Syncing this clock to world time…", W / 2, y + pad + font * 1.3 + q + pad * 0.4);
-  } else if (v.joined) {
-    const lines = overlayLines(v, now);
-    const font = Math.max(13, Math.round(u * 0.024));
-    const lh = Math.round(font * 1.45);
-    ctx.font = `bold ${font}px Arial, sans-serif`;
-    const w = Math.max(...lines.map((l) => ctx.measureText(l.text).width)) + font * 1.6;
-    const h = lines.length * lh + font;
-    const x = Math.round(u * 0.02);
-    const y = H - h - Math.round(u * 0.02);
-    ctx.fillStyle = "rgba(2, 6, 23, 0.82)";
-    ctx.fillRect(x, y, w, h);
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    lines.forEach((l, i) => {
-      ctx.fillStyle = TONE_COLOURS[l.tone];
-      ctx.fillText(l.text, x + font * 0.8, y + font * 0.5 + i * lh);
-    });
-  }
-  ctx.restore();
-};
-
-export default function OutputView({ stateRef, screenId, onClose, onDisplay }: Props) {
+export default function OutputView({ stateRef, screenId, onClose, onDisplay, onCloseQr }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const ownState = useRef<OutputState | null>(stateRef ? null : readOutputState());
   const [, setVersion] = useState(0);
@@ -130,7 +85,8 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
   const [isFullscreen, setIsFullscreen] = useState(() => document.fullscreenElement != null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   const logoFxRef = useRef(new Map<string, LogoFx>());
-  const qrRef = useRef<{ url: string; canvas: HTMLCanvasElement } | null>(null);
+  const [fps, setFps] = useState(0);
+  const [pairNow, setPairNow] = useState(Date.now());
 
   const current = () => (stateRef ? stateRef.current : ownState.current);
   const channelRef = useRef<BroadcastChannel | null>(null);
@@ -194,6 +150,9 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
   const outW = state ? (target ? target.w : state.config.canvas.w) : 0;
   const outH = state ? (target ? target.h : state.config.canvas.h) : 0;
   const hasLed = !!state?.config.screens.some((s) => s.ledLayout);
+  const pairing = state?.pairing ?? null;
+  // When the picture is scaled to fit, the AV Sync Test status gets a strip of its own at the right.
+  const reserve = !!pairing && fit;
 
   useEffect(() => {
     if (hasLed) void loadLedModule();
@@ -212,8 +171,17 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
     const cache = new Map<string, HTMLCanvasElement>();
     logoFxRef.current.clear();
     let raf = 0;
+    const fpsCount = { n: 0, t0: 0 };
     const tick = (frameTs: number) => {
       raf = requestAnimationFrame(tick);
+      // The output's own frame rate, counted over half a second.
+      if (!fpsCount.t0) fpsCount.t0 = frameTs;
+      fpsCount.n += 1;
+      if (frameTs - fpsCount.t0 >= 500) {
+        if (displayRef.current.status) setFps(Math.round((fpsCount.n * 1000) / (frameTs - fpsCount.t0)));
+        fpsCount.n = 0;
+        fpsCount.t0 = frameTs;
+      }
       const s = current();
       if (!s) return;
       // The frame's own timestamp, not Date.now() sampled whenever this callback ran: steady steps, no rounding.
@@ -241,10 +209,6 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
           drawLogo(ctx, fx, rect, now / 1000, seed);
         }
       }
-      if (s.pairing) {
-        if (qrRef.current?.url !== s.pairing.url) qrRef.current = { url: s.pairing.url, canvas: qrCanvas(s.pairing.url, 640) };
-        drawPairing(ctx, outW, outH, s.pairing, qrRef.current.canvas, Date.now());
-      }
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
@@ -255,7 +219,7 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
     const canvas = canvasRef.current;
     if (!canvas || !outW) return;
     if (fit) {
-      canvas.style.width = "100%";
+      canvas.style.width = reserve ? "calc(100% - 15rem)" : "100%";
       canvas.style.height = "100%";
       canvas.style.objectFit = "contain";
     } else {
@@ -263,7 +227,7 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
       canvas.style.height = `${outH / dpr}px`;
       canvas.style.objectFit = "";
     }
-  }, [outW, outH, dpr, fit]);
+  }, [outW, outH, dpr, fit, reserve]);
 
   useEffect(() => watchDevicePixelRatio(setDpr), []);
 
@@ -302,7 +266,14 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
       ro.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [outW, outH]);
+  }, [outW, outH, reserve]);
+
+  // The AV Sync Test status counts its own seconds.
+  useEffect(() => {
+    if (!pairing) return;
+    const id = window.setInterval(() => setPairNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [!!pairing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -348,6 +319,19 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
       }}
     >
       <canvas ref={canvasRef} className="absolute left-0 top-0 block" />
+      {pairing ? (
+        <div className="fixed right-3 top-3 z-10 w-56 space-y-1 rounded-lg border border-slate-600 bg-slate-950/90 px-3 py-2 text-xs text-slate-100 shadow-lg" onClick={(e) => e.stopPropagation()} aria-label="AV Sync Test status">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">AV Sync Test</div>
+          {statusRows(pairing, pairNow).map((r, i) => (
+            <StatusLine key={i} kind={r.kind} text={r.text} label={r.label} />
+          ))}
+        </div>
+      ) : null}
+      {pairing?.qrOpen && !pairing.joined ? (
+        <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/55" onClick={(e) => e.stopPropagation()}>
+          <QrCard url={pairing.url} until={pairing.qrUntil} onClose={() => (onCloseQr ? onCloseQr() : channelRef.current?.postMessage({ type: "closeQr" } satisfies OutputRequest))} />
+        </div>
+      ) : null}
       {statusVisible ? (
         <div
           className="fixed left-3 top-3 z-10 max-w-xs cursor-pointer space-y-2 font-mono text-xs"
@@ -366,6 +350,7 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
             <Row label="Output Resolution:" value={`${outW} x ${outH}`} />
             <Row label="Display Resolution:" value={displayW && displayH ? `${displayW} x ${displayH} (approx.)` : "Unknown"} />
             <Row label="Device Pixel Ratio:" value={dpr.toFixed(2)} />
+            <Row label="Frame rate:" value={fps ? `${fps} FPS` : "…"} />
             <Row label="Fullscreen:" value={isFullscreen ? "Yes" : "No"} />
             {sound.enabled && sound.blocked && sound.active ? <Row label="Sound:" value="Click to allow" warn /> : null}
             <Row label="Browser -> Output:" value={fit ? "Scaled (fit)" : scaled ? "Scaled" : "1:1"} warn={scaled && !fit} />

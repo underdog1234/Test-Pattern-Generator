@@ -3,7 +3,9 @@
 
 import type { GeneratorConfig } from "./model";
 import { Check, NumField, Panel, SelectField, SmallButton } from "./controls";
-import { overlayLines, type PairingView } from "../shared/pairing";
+import { statusRows, type PairingView } from "../shared/pairing";
+import { StatusLine } from "../shared/StatusIcon";
+import QrCard from "./QrCard";
 import type { OutputDisplay } from "./storage";
 import type { useSyncSound } from "./useSyncSound";
 
@@ -25,20 +27,23 @@ type Props = {
   pairing: PairingView | null;
   onStartPairing: () => void;
   onStopPairing: () => void;
+  onCloseQr: () => void;
+  onShowQr: () => void;
 };
 
-const Group = ({ label, children }: { label: string; children: React.ReactNode }) => (
-  <div className="flex flex-wrap items-center gap-2">
-    <span className="w-28 shrink-0 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">{label}</span>
-    {children}
+const Group = ({ label, children, wide }: { label: string; children: React.ReactNode; wide?: boolean }) => (
+  <div className={`min-w-0 space-y-1.5 ${wide ? "sm:col-span-2" : ""}`}>
+    <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">{label}</div>
+    <div className="flex flex-wrap items-center gap-2">{children}</div>
   </div>
 );
 
-export default function OutputPanel({ config, target, onTarget, onOpenWindow, onFullscreen, display, onDisplay, windowStatus, sound, world, worldSync, onLockWorld, onUnlockWorld, pairing, onStartPairing, onStopPairing }: Props) {
+export default function OutputPanel({ config, target, onTarget, onOpenWindow, onFullscreen, display, onDisplay, windowStatus, sound, world, worldSync, onLockWorld, onUnlockWorld, pairing, onStartPairing, onStopPairing, onCloseQr, onShowQr }: Props) {
   return (
-    <Panel title="Output">
+    <Panel id="output" title="Output">
+      <div className="grid gap-x-4 gap-y-3 sm:grid-cols-2">
       <Group label="Send to">
-        <div className="w-56">
+        <div className="w-full">
           <SelectField value={target} onChange={onTarget}>
             <option value="__canvas">Entire canvas</option>
             {config.screens.map((s) => (
@@ -84,34 +89,37 @@ export default function OutputPanel({ config, target, onTarget, onOpenWindow, on
             <SmallButton onClick={onUnlockWorld}>Unlock</SmallButton>
           </>
         ) : (
-          <SmallButton onClick={onLockWorld} disabled={worldSync.busy} title="Make the flashes and beeps happen exactly on each second of real time, so a Receive page elsewhere can measure how long the picture and sound take to arrive. Takes about 10 seconds.">
+          <SmallButton onClick={onLockWorld} disabled={worldSync.busy} title="Make the flashes and beeps happen exactly on each second of real time, so an AV Sync Test receiver elsewhere can measure how long the picture and sound take to arrive. Takes about 10 seconds.">
             {worldSync.busy ? `Syncing clock… ${Math.round(worldSync.progress * 100)}%` : "Lock to world time"}
           </SmallButton>
         )}
         {worldSync.failed ? <span className="text-xs text-amber-300">Couldn't reach the time server.</span> : null}
-        <span className="text-xs text-slate-500">For the Receive page's link-delay reading.</span>
+        <span className="text-xs text-slate-500">For the AV Sync Test link delay.</span>
       </Group>
-      <Group label="Pair a receiver">
+      <Group label="AV Sync Test" wide>
         {pairing ? (
           <>
-            <span className={`rounded px-2 py-0.5 text-xs ${pairing.joined ? "bg-emerald-500/20 text-emerald-200" : "bg-slate-700/60 text-slate-200"}`}>{pairing.joined ? "Receiver connected" : "Waiting for the receiver to scan the QR code on the output…"}</span>
-            <SmallButton onClick={onStopPairing}>Stop pairing</SmallButton>
+            <SmallButton onClick={onStopPairing}>Stop AV Sync Test</SmallButton>
+            {!pairing.joined && !pairing.qrOpen ? <SmallButton onClick={onShowQr}>Show QR code</SmallButton> : null}
           </>
         ) : (
-          <SmallButton onClick={onStartPairing} title="Shows a QR code on the output. Scan it with a phone to open the Receive page; the QR code goes away once it opens, and the receiver's readings and both clocks' status appear on the output instead.">
-            Show QR code on output
+          <SmallButton tone="primary" onClick={onStartPairing} title="Starts an AV Sync Test session: the connection QR code appears on the output and here straight away. Scan it with a phone to open the receiver.">
+            Start AV Sync Test
           </SmallButton>
         )}
-        <span className="text-xs text-slate-500">Open the output window or fullscreen to see it.</span>
+        <span className="text-xs text-slate-500">{pairing ? "Status shows top right of the output." : "Shows the QR code for the receiver automatically."}</span>
+        {pairing ? (
+          <div className="flex w-full flex-wrap items-start gap-3">
+            {pairing.qrOpen && !pairing.joined ? <QrCard url={pairing.url} until={pairing.qrUntil} onClose={onCloseQr} compact /> : null}
+            <div className="min-w-0 flex-1 space-y-1 rounded-lg border border-slate-700 bg-slate-950/60 p-2 text-xs text-slate-200">
+              {statusRows(pairing).map((r, i) => (
+                <StatusLine key={i} kind={r.kind} text={r.text} label={r.label} />
+              ))}
+            </div>
+          </div>
+        ) : null}
       </Group>
-      {pairing ? (
-        <div className="space-y-0.5 rounded-lg border border-slate-700 bg-slate-950/60 p-2 text-xs">
-          {(pairing.joined ? overlayLines(pairing) : [{ text: `This clock: ${pairing.senderClock ? `synced to world time ±${Math.round(pairing.senderClock.uncertaintyMs)} ms` : "syncing to world time…"}`, tone: pairing.senderClock ? ("ok" as const) : ("info" as const) }]).map((l, i) => (
-            <div key={i} className={l.tone === "ok" ? "text-emerald-200" : l.tone === "warn" ? "text-amber-200" : "text-slate-300"}>{l.text}</div>
-          ))}
-        </div>
-      ) : null}
-      <Group label="Sound">
+      <Group label="Sound" wide>
         <Check checked={sound.enabled} onChange={sound.setEnabled} title="Play the sound of the pattern (sync beeps, audio tests, lip sync voice) from this window, in step with the picture">
           🔊 Sound here
         </Check>
@@ -125,6 +133,7 @@ export default function OutputPanel({ config, target, onTarget, onOpenWindow, on
         </label>
         {sound.enabled && sound.blocked && sound.active ? <span className="text-xs text-amber-300">Click anywhere to allow sound</span> : null}
       </Group>
+      </div>
     </Panel>
   );
 }
