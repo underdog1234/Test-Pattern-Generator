@@ -151,12 +151,28 @@ export const openChannel = (): BroadcastChannel | null => {
  * current playlist step laid over it, or failing that every screen's place in
  * the auto cycle.
  */
+// effectiveConfig is asked for on every frame (and on every editor refresh), but
+// only changes when the playlist step or auto-cycle step does - so remember the
+// last result per config instead of rebuilding every screen sixty times a second.
+const effectiveMemo = new WeakMap<GeneratorConfig, { key: string; result: GeneratorConfig }>();
+const memoised = (config: GeneratorConfig, key: string, build: () => GeneratorConfig): GeneratorConfig => {
+  const hit = effectiveMemo.get(config);
+  if (hit && hit.key === key) return hit.result;
+  const result = build();
+  effectiveMemo.set(config, { key, result });
+  return result;
+};
+
 export const effectiveConfig = (config: GeneratorConfig, playback: Playback, now = Date.now()): { config: GeneratorConfig; stepIndex: number | null; cycleStep: number | null } => {
   const time = playbackTime(playback, now);
   if (playback.playlist.active && config.playlist.length) {
     const at = playlistStepAt(config.playlist, time - playback.playlist.startTime, playback.playlist.loop);
-    if (at) return { config: applyPlaylistStep(config, config.playlist[at.index]), stepIndex: at.index, cycleStep: null };
+    if (at) {
+      const step = config.playlist[at.index];
+      return { config: memoised(config, `p${at.index}:${step.id}`, () => applyPlaylistStep(config, step)), stepIndex: at.index, cycleStep: null };
+    }
   }
   if (!config.autoCycle.enabled) return { config, stepIndex: null, cycleStep: null };
-  return { config: applyAutoCycle(config, AUTO_CYCLE_IDS, time), stepIndex: null, cycleStep: Math.floor(Math.max(0, time) / Math.max(1, config.autoCycle.seconds)) };
+  const cycleStep = Math.floor(Math.max(0, time) / Math.max(1, config.autoCycle.seconds));
+  return { config: memoised(config, `c${cycleStep}`, () => applyAutoCycle(config, AUTO_CYCLE_IDS, time)), stepIndex: null, cycleStep };
 };

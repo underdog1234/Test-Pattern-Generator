@@ -6,6 +6,7 @@
 // display pixel, and anything else is reported on screen.
 import { useEffect, useRef, useState } from "react";
 import { computePixelMappingStatus, watchDevicePixelRatio } from "../testPattern/pixelMapping";
+import { frameEpochMs } from "./frameClock";
 import { applyGlitch } from "./glitch";
 import { LOGO_PATH_D, LogoFx } from "./logoFx";
 import { defaultDisplay, effectiveConfig, openChannel, playbackTime, readOutputState, type OutputDisplay, type OutputRequest, type OutputState } from "./storage";
@@ -44,7 +45,7 @@ const drawLogo = (ctx: CanvasRenderingContext2D, fx: LogoFx, area: Rect, t: numb
 };
 
 /** Where the logo bounces: inside every visible sub-screen on the canvas, or the one screen being shown. */
-const logoAreas = (config: GeneratorConfig, screenId: string | null): Array<{ rect: Rect; seed: number }> => {
+const computeLogoAreas = (config: GeneratorConfig, screenId: string | null): Array<{ rect: Rect; seed: number }> => {
   if (screenId) {
     const s = config.screens.find((x) => x.id === screenId);
     return s ? [{ rect: { x: 0, y: 0, w: s.w, h: s.h }, seed: 0 }] : [];
@@ -58,6 +59,17 @@ const logoAreas = (config: GeneratorConfig, screenId: string | null): Array<{ re
     const y1 = Math.min(h, s.y + s.h);
     return x1 > x0 && y1 > y0 ? [{ rect: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, seed: i }] : [];
   });
+};
+
+// The areas only change when the config does, so work them out once per config, not every frame.
+const areasCache = new WeakMap<GeneratorConfig, Map<string, Array<{ rect: Rect; seed: number }>>>();
+const logoAreas = (config: GeneratorConfig, screenId: string | null) => {
+  let byScreen = areasCache.get(config);
+  if (!byScreen) areasCache.set(config, (byScreen = new Map()));
+  const key = screenId ?? "";
+  let areas = byScreen.get(key);
+  if (!areas) byScreen.set(key, (areas = computeLogoAreas(config, screenId)));
+  return areas;
 };
 
 export default function OutputView({ stateRef, screenId, onClose, onDisplay }: Props) {
@@ -149,11 +161,12 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
     const cache = new Map<string, HTMLCanvasElement>();
     logoFxRef.current.clear();
     let raf = 0;
-    const tick = () => {
+    const tick = (frameTs: number) => {
       raf = requestAnimationFrame(tick);
       const s = current();
       if (!s) return;
-      const now = Date.now();
+      // The frame's own timestamp, not Date.now() sampled whenever this callback ran: steady steps, no rounding.
+      const now = frameEpochMs(frameTs);
       const { config } = effectiveConfig(s.config, s.playback, now);
       const time = playbackTime(s.playback, now);
       if (screenId) {
@@ -162,11 +175,11 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         renderScreen(ctx, screen, time, { loopSeconds: config.loopSeconds, canvas: { w: config.canvas.w, h: config.canvas.h } });
       } else {
-        renderComposite(ctx, config, time, cache);
+        renderComposite(ctx, config, time, cache, 1, true);
       }
       if (displayRef.current.logo) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        logoAreas(config, screenId).forEach(({ rect, seed }) => {
+        for (const { rect, seed } of logoAreas(config, screenId)) {
           // One LogoFx per screen, rebuilt if the screen's size changes.
           const key = `${seed}:${rect.w}x${rect.h}`;
           let fx = logoFxRef.current.get(key);
@@ -175,7 +188,7 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
             logoFxRef.current.set(key, fx);
           }
           drawLogo(ctx, fx, rect, now / 1000, seed);
-        });
+        }
       }
     };
     raf = requestAnimationFrame(tick);

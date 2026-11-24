@@ -275,25 +275,41 @@ export const renderScreenToCanvas = (screen: SubScreen, time: number, rc: Render
  */
 export type SurfaceCache = Map<string, HTMLCanvasElement>;
 
+// Visible, and at least partly on the canvas - otherwise there is nothing to draw.
+const onCanvas = (s: SubScreen, w: number, h: number) =>
+  s.visible && s.w > 0 && s.h > 0 && !(s.x >= w || s.y >= h || s.x + s.w <= 0 || s.y + s.h <= 0);
+
 /**
  * `scale` is for the editor's preview only: the screens are still drawn at
  * their native resolution and then placed scaled. Every output and export
  * uses 1.
+ *
+ * `direct` (live output only, needs scale 1): draw each screen straight onto
+ * the canvas instead of into its own surface and then copying that across.
+ * Every screen starts with an opaque black fill and clips to its own rectangle,
+ * so the pixels are identical - but it saves a full-resolution copy of every
+ * screen on every frame, and the memory for the surfaces.
  */
-export const renderComposite = (ctx: CanvasRenderingContext2D, config: GeneratorConfig, time: number, cache: SurfaceCache, scale = 1) => {
+export const renderComposite = (ctx: CanvasRenderingContext2D, config: GeneratorConfig, time: number, cache: SurfaceCache, scale = 1, direct = false) => {
   const { w, h, background } = config.canvas;
   const rc: RenderContext = { loopSeconds: config.loopSeconds, canvas: { w, h } };
+  const useDirect = direct && scale === 1;
   ctx.save();
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.imageSmoothingEnabled = scale < 1;
   ctx.fillStyle = background;
   ctx.fillRect(0, 0, w, h);
-  const live = new Set<string>();
-  config.screens.forEach((screen) => {
-    if (!screen.visible || screen.w <= 0 || screen.h <= 0) return;
-    // Nothing of this screen lands on the canvas - skip the work.
-    if (screen.x >= w || screen.y >= h || screen.x + screen.w <= 0 || screen.y + screen.h <= 0) return;
-    live.add(screen.id);
+  let live = 0;
+  for (const screen of config.screens) {
+    if (!onCanvas(screen, w, h)) continue;
+    live += 1;
+    if (useDirect) {
+      ctx.save();
+      ctx.translate(screen.x, screen.y);
+      renderScreen(ctx, screen, time, rc);
+      ctx.restore();
+      continue;
+    }
     let surface = cache.get(screen.id);
     if (!surface) {
       surface = document.createElement("canvas");
@@ -307,11 +323,13 @@ export const renderComposite = (ctx: CanvasRenderingContext2D, config: Generator
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     renderScreen(sctx, screen, time, rc);
     ctx.drawImage(surface, screen.x, screen.y);
-  });
-  // Drop canvases for screens that are gone, so a long session doesn't hold onto memory.
-  [...cache.keys()].forEach((id) => {
-    if (!live.has(id)) cache.delete(id);
-  });
+  }
+  // Drop canvases for screens that are gone, so a long session doesn't hold onto
+  // memory. Only looked for when there are more surfaces than screens drawn.
+  if (cache.size > (useDirect ? 0 : live)) {
+    const ids = new Set(useDirect ? [] : config.screens.filter((s) => onCanvas(s, w, h)).map((s) => s.id));
+    for (const id of [...cache.keys()]) if (!ids.has(id)) cache.delete(id);
+  }
   ctx.restore();
 };
 

@@ -148,38 +148,13 @@ const drawArrow = (ctx: CanvasRenderingContext2D, x: number, y: number, size: nu
   ctx.restore();
 };
 
-const drawLedMoving: PatternDef["draw"] = (ctx, w, h, s, info) => {
-  const pw = Math.max(4, Math.round(Number(info.led?.panelPxW ?? s.panelPxW)));
-  const ph = Math.max(4, Math.round(Number(info.led?.panelPxH ?? s.panelPxH)));
-  const cols = Math.ceil(w / pw);
-  const rows = Math.ceil(h / ph);
-  const p = s.motion ? info.progress : 0;
-  ctx.save();
-  ctx.imageSmoothingEnabled = false;
-  const tile = rgbTile(pw, ph);
-  const pattern = ctx.createPattern(tile, "repeat")!;
-  pattern.setTransform(new DOMMatrix().translate(Math.round(p * pw * 3), 0));
-  ctx.fillStyle = pattern;
-  ctx.fillRect(0, 0, w, h);
-  // Greyscale band: brightness is a triangle wave of (x + y), one band across
-  // the whole screen, sliding one full period per loop so it repeats with no
-  // seam. Multiply keeps every panel's hue and only dims it.
-  const period = w + h;
-  const slide = p * period;
-  const start = slide - period;
-  const k = Math.ceil((w + h - start) / period) + 1;
-  const end = start + period * k;
-  const grad = ctx.createLinearGradient(start / 2, start / 2, end / 2, end / 2);
-  for (let j = 0; j < k; j += 1) {
-    grad.addColorStop(j / k, "#404040");
-    grad.addColorStop((j + 0.5) / k, "#ffffff");
-  }
-  grad.addColorStop(1, "#404040");
-  ctx.globalCompositeOperation = "multiply";
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, w, h);
-  ctx.globalCompositeOperation = "source-over";
+type LedStaticArgs = { w: number; h: number; pw: number; ph: number; cols: number; rows: number; s: Parameters<PatternDef["draw"]>[3]; info: Parameters<PatternDef["draw"]>[4] };
 
+// Everything on the LED pattern that does not move: panel outlines, row and column
+// labels, the frame, alignment cross and circle, and the details in the middle. With
+// a few hundred panels that is hundreds of text and path draws, so it is drawn once
+// into its own layer and copied across each frame instead of being redrawn.
+const drawLedStatic = (ctx: CanvasRenderingContext2D, { w, h, pw, ph, cols, rows, s, info }: LedStaticArgs) => {
   // Panel outlines and references.
   ctx.fillStyle = "#ffffff";
   for (let c = 0; c <= cols; c += 1) ctx.fillRect(Math.min(w - 1, c * pw), 0, 1, h);
@@ -235,6 +210,53 @@ const drawLedMoving: PatternDef["draw"] = (ctx, w, h, s, info) => {
     const y0 = h / 2 - (lineH * (lines.length - 1)) / 2;
     lines.forEach((line, i) => ctx.fillText(line, w / 2, y0 + i * lineH));
   }
+};
+
+const ledStaticCache = new Map<string, HTMLCanvasElement>();
+
+const drawLedMoving: PatternDef["draw"] = (ctx, w, h, s, info) => {
+  const pw = Math.max(4, Math.round(Number(info.led?.panelPxW ?? s.panelPxW)));
+  const ph = Math.max(4, Math.round(Number(info.led?.panelPxH ?? s.panelPxH)));
+  const cols = Math.ceil(w / pw);
+  const rows = Math.ceil(h / ph);
+  const p = s.motion ? info.progress : 0;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  const tile = rgbTile(pw, ph);
+  const pattern = ctx.createPattern(tile, "repeat")!;
+  pattern.setTransform(new DOMMatrix().translate(Math.round(p * pw * 3), 0));
+  ctx.fillStyle = pattern;
+  ctx.fillRect(0, 0, w, h);
+  // Greyscale band: brightness is a triangle wave of (x + y), one band across
+  // the whole screen, sliding one full period per loop so it repeats with no
+  // seam. Multiply keeps every panel's hue and only dims it.
+  const period = w + h;
+  const slide = p * period;
+  const start = slide - period;
+  const k = Math.ceil((w + h - start) / period) + 1;
+  const end = start + period * k;
+  const grad = ctx.createLinearGradient(start / 2, start / 2, end / 2, end / 2);
+  for (let j = 0; j < k; j += 1) {
+    grad.addColorStop(j / k, "#404040");
+    grad.addColorStop((j + 0.5) / k, "#ffffff");
+  }
+  grad.addColorStop(1, "#404040");
+  ctx.globalCompositeOperation = "multiply";
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+  ctx.globalCompositeOperation = "source-over";
+
+  const key = [w, h, pw, ph, s.showLabels, s.showAlignment, s.showInfo, info.screen.name, info.led?.panelName ?? "", info.led?.cols ?? "", info.led?.rows ?? ""].join("|");
+  let layer = ledStaticCache.get(key);
+  if (!layer) {
+    layer = document.createElement("canvas");
+    layer.width = w;
+    layer.height = h;
+    drawLedStatic(layer.getContext("2d")!, { w, h, pw, ph, cols, rows, s, info });
+    if (ledStaticCache.size >= 6) ledStaticCache.clear();
+    ledStaticCache.set(key, layer);
+  }
+  ctx.drawImage(layer, 0, 0);
   ctx.restore();
 };
 

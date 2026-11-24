@@ -27,6 +27,8 @@ type Props = {
   onBeginEdit: () => void;
   onRects: (rects: Record<string, Rect>) => void;
   maxHeight: number;
+  /** The fullscreen output is covering the editor: stop drawing a preview nobody can see. */
+  paused?: boolean;
 };
 
 type Drag =
@@ -45,7 +47,7 @@ const HANDLES: Array<{ h: ResizeHandle; x: number; y: number; cursor: string }> 
   { h: "w", x: 0, y: 0.5, cursor: "ew-resize" },
 ];
 
-export default function CanvasEditor({ config, frameSource, selectedIds, onSelect, onBeginEdit, onRects, maxHeight }: Props) {
+export default function CanvasEditor({ config, frameSource, selectedIds, onSelect, onBeginEdit, onRects, maxHeight, paused = false }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [boxW, setBoxW] = useState(800);
@@ -73,7 +75,7 @@ export default function CanvasEditor({ config, frameSource, selectedIds, onSelec
   // changed) so an idle editor costs nothing.
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || paused) return;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.max(1, Math.round(previewW * dpr));
     canvas.height = Math.max(1, Math.round(previewH * dpr));
@@ -95,7 +97,7 @@ export default function CanvasEditor({ config, frameSource, selectedIds, onSelec
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [previewW, previewH, scale, frameSource]);
+  }, [previewW, previewH, scale, frameSource, paused]);
 
   const visible = useMemo(() => config.screens.filter((s) => s.visible), [config.screens]);
   const selected = new Set(selectedIds);

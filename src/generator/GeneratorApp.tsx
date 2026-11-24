@@ -97,7 +97,6 @@ export default function GeneratorApp() {
   const [screenPicker, setScreenPicker] = useState<{ screens: ScreenDetailed[]; url: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const plannerRef = useRef<HTMLInputElement | null>(null);
   const channelRef = useRef<BroadcastChannel | null>(null);
 
   const commit = useCallback((next: GeneratorConfig, history: boolean) => {
@@ -193,9 +192,12 @@ export default function GeneratorApp() {
 
   // A coarse clock for the playback readout and playlist highlight.
   useEffect(() => {
+    // Not while the fullscreen output is up: nothing visible reads it, and each tick re-renders the whole page.
+    if (inlineOutput) return;
+    setNow(Date.now());
     const id = window.setInterval(() => setNow(Date.now()), 250);
     return () => window.clearInterval(id);
-  }, []);
+  }, [inlineOutput]);
 
   // What the editor preview draws each frame.
   const frameSource = useRef(() => {
@@ -411,19 +413,10 @@ export default function GeneratorApp() {
     flash(`Imported ${next.screens.length} screen${next.screens.length === 1 ? "" : "s"} from the LED Cabling Planner project${next.name ? ` "${next.name}"` : ""}.`);
   };
 
-  const [plannerHandoff, setPlannerHandoff] = useState(readPlannerHandoff);
-  // The planner may send a newer project while this tab stays open.
-  useEffect(() => {
-    const onStorage = () => setPlannerHandoff(readPlannerHandoff());
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
   const loadPlannerHandoff = async (quiet: boolean) => {
     const handoff = readPlannerHandoff();
-    setPlannerHandoff(handoff);
     if (!handoff) {
-      if (!quiet) window.alert("No LED Cabling Planner project has been sent here yet. Use the Test Pattern Generator button in the planner.");
+      if (!quiet) window.alert("No LED Cabling Planner project has been sent here yet. Open this page from the planner's Test Pattern Generator button.");
       return;
     }
     try {
@@ -562,16 +555,7 @@ export default function GeneratorApp() {
         <SmallButton onClick={() => setShowConfigs(true)}>Configurations</SmallButton>
         <SmallButton onClick={saveFile}>Save file</SmallButton>
         <SmallButton onClick={() => fileRef.current?.click()}>Open file</SmallButton>
-        <SmallButton
-          onClick={() => void loadPlannerHandoff(false)}
-          disabled={!plannerHandoff}
-          title={plannerHandoff ? "Bring in the project the LED Cabling Planner last opened this page with: its Output Canvas, sub-screens and their positions, each running its LED layout pattern" : "Open this page from the LED Cabling Planner's Test Pattern Generator button to bring its project across"}
-        >
-          Planner project
-        </SmallButton>
-        <SmallButton onClick={() => plannerRef.current?.click()} title="Open a project saved by the LED Cabling Planner: its Output Canvas and sub-screens come across">Import LED Planner project</SmallButton>
         <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, false); e.target.value = ""; }} />
-        <input ref={plannerRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, true); e.target.value = ""; }} />
         <span className="mx-1 h-5 w-px bg-slate-700" />
         <SmallButton tone="primary" onClick={() => setShowExport(true)} title="Save images, a PDF or a video of the patterns">Download…</SmallButton>
         <a className="ml-auto text-xs text-sky-300 hover:underline" href="https://script.google.com/macros/s/AKfycbwsrCoqVwHdQHYPUDIDGv64vjwTF4DfAngFZ0KwUWANx6ZaL2EmRquxgYRIWcQYSCS4/exec" target="_blank" rel="noopener noreferrer">MMS Links ↗</a>
@@ -632,6 +616,7 @@ export default function GeneratorApp() {
               onBeginEdit={beginEdit}
               onRects={setRects}
               maxHeight={editorMaxHeight}
+              paused={!!inlineOutput}
             />
           </div>
           {warnings.length ? (
