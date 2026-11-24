@@ -15,6 +15,8 @@
 import type { LedGrid, PatternSettings } from "./model";
 import { drawFaces } from "./faces";
 import { drawPhotoFaces } from "./photoFaces";
+import { AUDIO_TEST_SECONDS, audioTestBeeps, drawAudioTest } from "./audioTest";
+import { LIPSYNC_MIN_LOOP, drawLipSync, lipSyncBeeps } from "./lipSync";
 
 export type ParamDef =
   | { key: string; label: string; type: "number"; min: number; max: number; step?: number; default: number }
@@ -33,18 +35,23 @@ export type PatternInfo = {
   canvas: { w: number; h: number };
 };
 
-/** A tone the pattern makes at `at` seconds into its loop. */
-export type Beep = { at: number; freq: number; duration: number; gain?: number };
+/**
+ * A sound the pattern makes at `at` seconds into its loop: a sine tone, or - with `clip` - a recorded or synthesised
+ * clip (see clips.ts). `route` sends a mono sound to one speaker only; stereo clips carry their own channels.
+ */
+export type Beep = { at: number; freq: number; duration: number; gain?: number; clip?: string; route?: "L" | "R" | "LR" };
 
 export type PatternDef = {
   id: string;
   name: string;
-  category: "Broadcast" | "Geometry" | "Greyscale & colour" | "Motion" | "LED" | "Reference";
+  category: "Broadcast" | "Geometry" | "Greyscale & colour" | "Motion" | "Audio" | "LED" | "Reference";
   animated: boolean;
   params: ParamDef[];
   draw: (ctx: CanvasRenderingContext2D, w: number, h: number, s: Required<PatternSettings>, info: PatternInfo) => void;
   /** Sync tones, for patterns that have them. */
   beeps?: (s: Required<PatternSettings>, loopSeconds: number) => Beep[];
+  /** The shortest loop (seconds) that plays the whole pattern, for patterns that tell a story over time. */
+  minLoopSeconds?: number;
 };
 
 // --- helpers ----------------------------------------------------------------
@@ -934,6 +941,14 @@ export const PATTERNS: PatternDef[] = [
     { key: "beep", label: "Beep", type: "boolean", default: true },
     { key: "color", label: "Flash colour", type: "color", default: "#ffffff" },
   ], draw: drawAvSync, beeps: avSyncBeeps },
+  { id: "audio-test", name: "Audio Tests (left, right, phase, sub)", category: "Audio", animated: true, minLoopSeconds: AUDIO_TEST_SECONDS, params: [
+    { key: "volume", label: "Volume", type: "number", min: 5, max: 100, step: 5, default: 60 },
+    { key: "voice", label: "Voice announces each test", type: "boolean", default: true },
+  ], draw: drawAudioTest, beeps: audioTestBeeps },
+  { id: "lip-sync", name: "Lip Sync (speaking face)", category: "Audio", animated: true, minLoopSeconds: LIPSYNC_MIN_LOOP, params: [
+    { key: "volume", label: "Volume", type: "number", min: 5, max: 100, step: 5, default: 80 },
+    { key: "subtitles", label: "Show the words", type: "boolean", default: true },
+  ], draw: drawLipSync, beeps: lipSyncBeeps },
   { id: "pixel", name: "Pixel Structure", category: "Geometry", animated: false, params: [
     { key: "mode", label: "Mode", type: "select", options: [
       { value: "vertical", label: "Vertical lines" }, { value: "horizontal", label: "Horizontal lines" }, { value: "checker", label: "Pixel checker" }, { value: "dots", label: "Dots" },

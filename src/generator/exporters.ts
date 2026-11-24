@@ -11,7 +11,7 @@
 import { zipSync } from "fflate";
 import { MP4_RECORD_MARGIN_SECONDS } from "../testPattern/mp4Encode";
 import { exportFileName, uniqueNames, type GeneratorConfig, type SubScreen } from "./model";
-import { beepsFor, renderBeepSamples, renderBeepsWav, screenBeeps, startRecordingSound, type ScheduledBeep } from "./audio";
+import { beepsFor, monoBeeps, renderBeepSamples, renderBeepsWav, screenBeeps, startRecordingSound, type ScheduledBeep } from "./audio";
 import { muxWebm, opusHead, type MuxPacket } from "./webmMux";
 import { patternName } from "./patterns";
 import { loadPhotoFaces } from "./photoFaces";
@@ -48,7 +48,7 @@ export const canvasItem = (config: GeneratorConfig): ExportItem => {
     w: config.canvas.w,
     h: config.canvas.h,
     draw: (ctx, time) => renderComposite(ctx, config, time, cache),
-    beeps: beepsFor(config.screens, config.loopSeconds),
+    beeps: monoBeeps(beepsFor(config.screens, config.loopSeconds)),
   };
 };
 
@@ -62,7 +62,7 @@ export const screenItem = (config: GeneratorConfig, screen: SubScreen): ExportIt
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       renderScreen(ctx, screen, time, rc);
     },
-    beeps: screenBeeps(screen, config.loopSeconds),
+    beeps: monoBeeps(screenBeeps(screen, config.loopSeconds)),
   };
 };
 

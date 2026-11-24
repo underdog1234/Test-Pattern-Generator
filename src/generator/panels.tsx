@@ -241,6 +241,7 @@ export function Inspector({
   onPatch,
   onApplyPatternToSelection,
   onSavePreset,
+  onLoopSeconds,
 }: {
   config: GeneratorConfig;
   screen: SubScreen;
@@ -248,6 +249,7 @@ export function Inspector({
   onPatch: (patch: Partial<SubScreen>) => void;
   onApplyPatternToSelection: () => void;
   onSavePreset: (p: ResolutionPreset) => void;
+  onLoopSeconds: (seconds: number) => void;
 }) {
   const def = PATTERN_BY_ID.get(screen.pattern) ?? PATTERN_BY_ID.get("info")!;
   const settings = resolveSettings(def, screen.settings[def.id]);
@@ -314,6 +316,12 @@ export function Inspector({
             </div>
           ))}
         </div>
+        {def.minLoopSeconds && config.loopSeconds < def.minLoopSeconds ? (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-400 bg-amber-500/15 p-2 text-xs text-amber-200">
+            <span>This test takes {def.minLoopSeconds} s, but the loop is {config.loopSeconds} s, so it is cut short and its sound is left out.</span>
+            <SmallButton onClick={() => onLoopSeconds(def.minLoopSeconds!)}>Set loop to {def.minLoopSeconds} s</SmallButton>
+          </div>
+        ) : null}
         <div className="grid grid-cols-2 gap-2">
           <SelectField label="Movement" value={screen.motion.direction} onChange={(v) => onPatch({ motion: { ...screen.motion, direction: v as MotionDirection } })}>
             {MOTION_DIRECTIONS.map((d) => (

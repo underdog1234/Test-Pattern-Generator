@@ -234,7 +234,7 @@ export default function ReceiveApp() {
     const secs = (Date.now() - startedAt) / 1000;
     if (secs < 4) return { tone: "info", text: "Listening and watching… the sender flashes and beeps once a second." };
     if (counts.flashes === 0 && counts.beeps === 0) return { tone: "warn", text: "Nothing yet. Check the sender is running the AV Sync Flash and Beep pattern in fullscreen with sound on, and that this camera can see the screen." };
-    if (counts.flashes > 0 && counts.beeps === 0) return { tone: "warn", text: "Seeing the flash but not hearing the beep. Turn the sender's volume up, tick “Beeps here” on the sender, move the microphone closer, or raise the sound sensitivity." };
+    if (counts.flashes > 0 && counts.beeps === 0) return { tone: "warn", text: "Seeing the flash but not hearing the beep. Turn the sender's volume up, tick “Sound here” on the sender, move the microphone closer, or raise the sound sensitivity." };
     if (counts.beeps > 0 && counts.flashes === 0) return { tone: "warn", text: "Hearing the beep but not seeing the flash. Fill the view with the screen (or drag a box around it), dim the room, or raise the picture sensitivity." };
     if (counts.flashes + counts.beeps >= 8 && pairs.length === 0) return { tone: "warn", text: "Both are detected but never close together. Is the sender's flash interval longer than a second, or is the sound coming from a different device with a big delay?" };
     if (meters && meters.fps > 5 && meters.fps < 45 && sum && sum.n >= 3) return { tone: "info", text: `The camera is running at ${meters.fps.toFixed(0)} fps, so each flash is rounded to a ${(1000 / meters.fps).toFixed(0)} ms frame. More light on the screen's room usually brings a phone back to 60 fps; until then trust the median of many readings, not any single one.` };
@@ -355,7 +355,7 @@ export default function ReceiveApp() {
             <div className="space-y-3 rounded-xl border border-slate-700 bg-slate-900/80 p-4">
               <div className="text-lg font-bold">Measure how far sound and picture are apart</div>
               <ol className="list-decimal space-y-1 pl-5 text-sm text-slate-300">
-                <li>On the sender, open the <a className="text-sky-300 underline" href="./">Test Pattern Generator</a>, choose <b>Configurations → AV sync check</b>, tick <b>Beeps here</b>, press <b>Show QR code on output</b>, then open the output fullscreen. Scan the QR code with this device (that opens this page and pairs the two). Or just open this page directly for a stand-alone reading.</li>
+                <li>On the sender, open the <a className="text-sky-300 underline" href="./">Test Pattern Generator</a>, choose <b>Configurations → AV sync check</b>, tick <b>Sound here</b>, press <b>Show QR code on output</b>, then open the output fullscreen. Scan the QR code with this device (that opens this page and pairs the two). Or just open this page directly for a stand-alone reading.</li>
                 <li>On this device, press Start and allow the camera and microphone.</li>
                 <li>Aim the camera at the screen so it fills the view, near enough to hear the speaker. Readings appear after a few flashes.</li>
               </ol>

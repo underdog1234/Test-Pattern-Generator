@@ -297,6 +297,20 @@ export const avSyncCheckConfig = (): GeneratorConfig => ({
   name: "AV sync check",
 });
 
+/** One 1080p screen running the audio tests. The loop is long enough for the whole walk-through. */
+export const audioTestConfig = (): GeneratorConfig => ({
+  ...baseConfig({ w: 1920, h: 1080 }, [makeScreen(0, { name: "Audio tests", x: 0, y: 0, w: 1920, h: 1080, pattern: "audio-test" })]),
+  name: "Audio tests",
+  loopSeconds: 40,
+});
+
+/** One 1080p screen with the speaking face. */
+export const lipSyncConfig = (): GeneratorConfig => ({
+  ...baseConfig({ w: 1920, h: 1080 }, [makeScreen(0, { name: "Lip sync", x: 0, y: 0, w: 1920, h: 1080, pattern: "lip-sync" })]),
+  name: "Lip sync",
+  loopSeconds: 24,
+});
+
 /** What a new configuration starts as. */
 export const defaultConfig = (): GeneratorConfig => standard1080pConfig();
 
@@ -306,6 +320,8 @@ export type LayoutPreset = { id: string; name: string; description: string; buil
 export const LAYOUT_PRESETS: LayoutPreset[] = [
   { id: "standard-1080p", name: "Standard 1080p (16:9)", description: "One screen, 1920 × 1080", build: standard1080pConfig },
   { id: "av-sync-check", name: "AV sync check", description: "One screen flashing and beeping once a second - the sender for the Receive page", build: avSyncCheckConfig },
+  { id: "audio-tests", name: "Audio tests", description: "Left, right, phase and sub bass, announced by a voice - turn sound on in the Output section", build: audioTestConfig },
+  { id: "lip-sync", name: "Lip sync", description: "An illustrated face speaking a passage, to check sound and picture line up", build: lipSyncConfig },
   { id: "four-screens", name: "Four screens on 4K", description: "Four 1920 × 1080 screens on a 3840 × 2160 canvas", build: fourScreenConfig },
   { id: "empty", name: "Empty canvas", description: "3840 × 2160, no screens", build: () => baseConfig(LEGACY_CANVAS, []) },
 ];

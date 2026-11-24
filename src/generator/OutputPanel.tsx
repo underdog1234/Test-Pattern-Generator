@@ -112,14 +112,14 @@ export default function OutputPanel({ config, target, onTarget, onOpenWindow, on
         </div>
       ) : null}
       <Group label="Sound">
-        <Check checked={sound.enabled} onChange={sound.setEnabled} title="Play the timecode and AV sync beeps from this window, in step with the flashes">
-          🔊 Beeps here
+        <Check checked={sound.enabled} onChange={sound.setEnabled} title="Play the sound of the pattern (sync beeps, audio tests, lip sync voice) from this window, in step with the picture">
+          🔊 Sound here
         </Check>
-        <Check checked={display.beeps} onChange={(v) => onDisplay({ beeps: v })} title="Play the beeps from the separate output window instead (or as well)">
-          🔊 Beeps in output window
+        <Check checked={display.beeps} onChange={(v) => onDisplay({ beeps: v })} title="Play the sound from the separate output window instead (or as well)">
+          🔊 Sound in output window
         </Check>
         <label className="flex items-center gap-1 text-xs text-slate-400" title="Moves every beep later (positive) or earlier (negative) by this many milliseconds, to line the sound up with a display or processor that shows the picture late">
-          Beep delay
+          Sound delay
           <NumField className="w-20" value={sound.offsetMs} min={-1000} max={1000} onCommit={sound.setOffsetMs} />
           ms
         </label>

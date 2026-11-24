@@ -377,7 +377,7 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
                 {logo ? "Hide logo" : "Bouncing logo"}
               </button>
               <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); sound.setEnabled(!sound.enabled); }}>
-                {sound.enabled ? "🔊 Beeps on" : "🔇 Beeps off"}
+                {sound.enabled ? "🔊 Sound on" : "🔇 Sound off"}
               </button>
               {onClose ? (
                 <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); document.exitFullscreen?.().catch(() => {}); onClose(); }}>
@@ -385,7 +385,7 @@ export default function OutputView({ stateRef, screenId, onClose, onDisplay }: P
                 </button>
               ) : null}
             </div>
-            <div className="pt-1 text-[10px] text-slate-500">Click to hide · H toggles · F fullscreen · L logo (live only, never exported) · S beeps{onClose ? " · Esc closes" : ""}</div>
+            <div className="pt-1 text-[10px] text-slate-500">Click to hide · H toggles · F fullscreen · L logo (live only, never exported) · S sound{onClose ? " · Esc closes" : ""}</div>
           </div>
         </div>
       ) : null}

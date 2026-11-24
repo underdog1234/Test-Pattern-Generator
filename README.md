@@ -20,6 +20,15 @@ The live output draws from the browser's own frame timestamp (`src/generator/fra
 
 Detection logic is in `src/receive/sync.ts`; the microphone runs in an AudioWorklet (`toneWorklet.ts`); the camera and mic engine is `engine.ts`.
 
+## Audio tests and lip sync
+
+Both are in the **Audio** group of the pattern list, and each has a start layout in Configurations. Turn on **Sound here** (or **Sound in output window**) in the Output section; browsers only start sound after a click. Both need a long enough loop: the editor shows a warning with a one-click fix if the loop is too short.
+
+- **Audio Tests** (37 s): a voice and on-screen label announce each test while it plays: left speaker only, right only, both, in phase and out of phase (pink noise; the out-of-phase noise is an exact mirror, so it cancels if the speakers are summed to mono), music with a deep kick and bass line, then a 20-120 Hz sub sweep with the frequency shown. It checks stereo channels, polarity and low end; it is not a surround (5.1) test.
+- **Lip Sync** (about 21 s): an illustrated face (not a real person) says a passage while its lips follow the voice, with the words shown below. The mouth shapes come from the same text-to-speech run that made the audio (`src/generator/lipsyncData.ts`), and the passage includes p, b, m and f, v sounds where the lips visibly close or touch the teeth.
+
+All sound is made by the app (synthesised noise, sweep and music) or is text-to-speech generated for this project (`public/audio`), so there are no third-party samples to license. The speech was made with the Microsoft David and Zira system voices; swap the WAV files in `public/audio` (and regenerate `lipsyncData.ts`) if you prefer another voice. Audio tests and lip sync are live-only: exports carry only plain sync beeps, because a video soundtrack here is mono.
+
 ## Bouncing Multi logo
 
 Turn on **Bouncing logo** in the editor (live output only, never in downloads):

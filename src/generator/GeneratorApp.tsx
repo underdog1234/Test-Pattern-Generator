@@ -717,6 +717,7 @@ export default function GeneratorApp() {
               screen={primary}
               selectionCount={selectedIds.length}
               onPatch={(patch) => patchScreen(primary.id, patch)}
+              onLoopSeconds={(seconds) => update((c) => ({ ...c, loopSeconds: seconds }))}
               onApplyPatternToSelection={() => {
                 const ids = new Set(selectedIds);
                 update((c) => ({

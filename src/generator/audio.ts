@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 
 import type { GeneratorConfig, SubScreen } from "./model";
+import { clipData, loadSpeechClips } from "./clips";
 import { PATTERN_BY_ID, resolveSettings, type Beep } from "./patterns";
 
 /** A beep placed on the pattern clock: it sounds whenever (time mod loop) equals `at`. */
@@ -28,12 +29,18 @@ export const screenBeeps = (screen: SubScreen, loopSeconds: number): ScheduledBe
     .sort((a, b) => a.at - b.at);
 };
 
+/** Identifies one beep (or clip) at one moment, so it is scheduled once. */
+const beepKey = (b: ScheduledBeep, time: number) => `${Math.round(time * 1000)}:${b.freq}:${b.clip ?? ""}:${b.route ?? ""}`;
+
+/** What a mono soundtrack can carry: plain tones in both speakers. Clips and one-sided tones are live-only. */
+export const monoBeeps = (beeps: ScheduledBeep[]): ScheduledBeep[] => beeps.filter((b) => !b.clip && (!b.route || b.route === "LR"));
+
 /** Every distinct beep the given screens make. Two screens beeping at the same moment make one beep. */
 export const beepsFor = (screens: SubScreen[], loopSeconds: number): ScheduledBeep[] => {
   const seen = new Map<string, ScheduledBeep>();
   screens.forEach((s) =>
     screenBeeps(s, loopSeconds).forEach((b) => {
-      const key = `${Math.round(b.at * 1000)}:${b.freq}`;
+      const key = beepKey(b, b.at);
       if (!seen.has(key)) seen.set(key, b);
     }),
   );
@@ -62,7 +69,35 @@ export const beepsBetween = (beeps: ScheduledBeep[], loopSeconds: number, from: 
 
 const RAMP = 0.001;
 
-const playTone = (ctx: BaseAudioContext, dest: AudioNode, when: number, b: ScheduledBeep) => {
+/** Where a mono sound plugs in: straight to the output, or into just the left or right speaker. */
+const routeTo = (ctx: BaseAudioContext, dest: AudioNode, route: ScheduledBeep["route"]): AudioNode => {
+  if (!route || route === "LR") return dest;
+  const merger = ctx.createChannelMerger(2);
+  const input = ctx.createGain();
+  input.channelCount = 1;
+  input.channelCountMode = "explicit";
+  input.connect(merger, 0, route === "L" ? 0 : 1);
+  merger.connect(dest);
+  return input;
+};
+
+/** Play a recorded or synthesised clip; false if it is not loaded (yet). */
+const playClip = (ctx: BaseAudioContext, dest: AudioNode, when: number, b: ScheduledBeep): boolean => {
+  const data = b.clip ? clipData(b.clip) : null;
+  if (!data) return false;
+  const buffer = ctx.createBuffer(data.channels.length, data.channels[0].length, data.rate);
+  data.channels.forEach((c, i) => buffer.copyToChannel(c as Float32Array<ArrayBuffer>, i));
+  const src = ctx.createBufferSource();
+  const gain = ctx.createGain();
+  gain.gain.value = b.gain ?? 0.8;
+  src.buffer = buffer;
+  src.connect(gain).connect(data.channels.length === 1 ? routeTo(ctx, dest, b.route) : dest);
+  src.start(when);
+  return true;
+};
+
+const playTone = (ctx: BaseAudioContext, dest: AudioNode, when: number, b: ScheduledBeep): boolean => {
+  if (b.clip) return playClip(ctx, dest, when, b);
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
   osc.type = "sine";
@@ -72,13 +107,15 @@ const playTone = (ctx: BaseAudioContext, dest: AudioNode, when: number, b: Sched
   gain.gain.linearRampToValueAtTime(level, when + RAMP);
   gain.gain.setValueAtTime(level, when + Math.max(RAMP, b.duration - RAMP));
   gain.gain.linearRampToValueAtTime(0, when + b.duration);
-  osc.connect(gain).connect(dest);
+  osc.connect(gain).connect(routeTo(ctx, dest, b.route));
   osc.start(when);
   osc.stop(when + b.duration + 0.01);
+  return true;
 };
 
 /** The beeps as 16-bit mono samples, each starting on its exact sample. */
-export const renderBeepSamples = (beeps: ScheduledBeep[], loopSeconds: number, seconds: number, sampleRate = 48000): Int16Array => {
+export const renderBeepSamples = (all: ScheduledBeep[], loopSeconds: number, seconds: number, sampleRate = 48000): Int16Array => {
+  const beeps = monoBeeps(all);
   const n = Math.max(1, Math.round(seconds * sampleRate));
   const samples = new Int16Array(n);
   beepsBetween(beeps, loopSeconds, 0, seconds).forEach((b) => {
@@ -119,6 +156,17 @@ export const renderBeepsWav = (beeps: ScheduledBeep[], loopSeconds: number, seco
   return out;
 };
 
+/**
+ * Render the sound of the beeps and clips - left and right kept apart - without playing it, through the same code as
+ * live playback. For checking that each sound lands in the speaker it should.
+ */
+export const renderStereoOffline = async (all: ScheduledBeep[], loopSeconds: number, seconds: number, sampleRate = 48000): Promise<Float32Array[]> => {
+  const ctx = new OfflineAudioContext(2, Math.round(seconds * sampleRate), sampleRate);
+  beepsBetween(all, loopSeconds, 0, seconds).forEach((b) => playTone(ctx, ctx.destination, b.time, b));
+  const buf = await ctx.startRendering();
+  return [buf.getChannelData(0), buf.getChannelData(1)];
+};
+
 // --- live sound -----------------------------------------------------------------
 
 const LOOKAHEAD = 0.3;
@@ -140,6 +188,7 @@ export class SyncSound {
     if (typeof AudioContext === "undefined") return;
     if (!this.ctx) this.ctx = new AudioContext({ latencyHint: "interactive" });
     if (this.ctx.state === "suspended") void this.ctx.resume();
+    void loadSpeechClips(this.ctx);
   }
 
   get blocked() {
@@ -188,15 +237,14 @@ export class SyncSound {
       const offset = sorted[Math.floor(sorted.length / 2)];
       const heardAt = (perf: number) => offset + perf / 1000;
       beepsBetween(beeps, config.loopSeconds, time - 0.03, time + LOOKAHEAD).forEach((b) => {
-        const key = `${Math.round(b.time * 1000)}:${b.freq}`;
+        const key = beepKey(b, b.time);
         if (this.scheduled.has(key)) return;
         // The first display frame at or after the beep's time, as a time on the frame clock.
         const frame = Math.max(0, Math.ceil(((b.time - time) * 1000) / period - 1e-6));
         // The frame is drawn at its timestamp and shown at the next refresh, one frame period later.
         const when = heardAt(frameTs + (frame + 1) * period) + this.offsetMs / 1000;
         if (when < ctx.currentTime - 0.005) return;
-        this.scheduled.add(key);
-        playTone(ctx, ctx.destination, Math.max(ctx.currentTime, when), b);
+        if (playTone(ctx, ctx.destination, Math.max(ctx.currentTime, when), b)) this.scheduled.add(key);
       });
       if (this.scheduled.size > 256) this.scheduled = new Set([...this.scheduled].slice(-64));
       return;
@@ -209,12 +257,11 @@ export class SyncSound {
     // those are the ones from (time - offset).
     const from = time - offset;
     beepsBetween(beeps, config.loopSeconds, from, from + LOOKAHEAD).forEach((b) => {
-      const key = `${Math.round(b.time * 1000)}:${b.freq}`;
+      const key = beepKey(b, b.time);
       if (this.scheduled.has(key)) return;
-      this.scheduled.add(key);
       const when = ctx.currentTime + (b.time - time) + offset;
       if (when < ctx.currentTime - 0.005) return;
-      playTone(ctx, ctx.destination, Math.max(ctx.currentTime, when), b);
+      if (playTone(ctx, ctx.destination, Math.max(ctx.currentTime, when), b)) this.scheduled.add(key);
     });
     if (this.scheduled.size > 256) {
       const keep = [...this.scheduled].slice(-64);
@@ -242,6 +289,7 @@ export const startRecordingSound = (
   loopSeconds: number,
   seconds: number,
 ): { track: MediaStreamTrack; stop: () => void; leadMs: number } | null => {
+  beeps = monoBeeps(beeps);
   if (!beeps.length || typeof AudioContext === "undefined") return null;
   const ctx = new AudioContext();
   const dest = ctx.createMediaStreamDestination();
