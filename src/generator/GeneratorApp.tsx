@@ -558,7 +558,8 @@ export default function GeneratorApp() {
         <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, false); e.target.value = ""; }} />
         <span className="mx-1 h-5 w-px bg-slate-700" />
         <SmallButton tone="primary" onClick={() => setShowExport(true)} title="Save images, a PDF or a video of the patterns">Download…</SmallButton>
-        <a className="ml-auto text-xs text-sky-300 hover:underline" href="https://script.google.com/macros/s/AKfycbwsrCoqVwHdQHYPUDIDGv64vjwTF4DfAngFZ0KwUWANx6ZaL2EmRquxgYRIWcQYSCS4/exec" target="_blank" rel="noopener noreferrer">MMS Links ↗</a>
+        <a className="ml-auto text-xs font-semibold text-sky-300 hover:underline" href="./receive.html" target="_blank" rel="noopener" title="Measure audio / video sync with this device's camera and microphone">Receive ↗</a>
+        <a className="text-xs text-sky-300 hover:underline" href="https://script.google.com/macros/s/AKfycbwsrCoqVwHdQHYPUDIDGv64vjwTF4DfAngFZ0KwUWANx6ZaL2EmRquxgYRIWcQYSCS4/exec" target="_blank" rel="noopener noreferrer">MMS Links ↗</a>
       </header>
 
       <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_380px]">

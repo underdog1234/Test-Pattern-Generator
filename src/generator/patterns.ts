@@ -587,7 +587,7 @@ const drawTimecode: PatternDef["draw"] = (ctx, w, h, s, info) => {
 // with sound, find the frame where the beep lands, and the lit cell reads the
 // error - in milliseconds by default, or in frames.
 
-/** The beep's pitch. Fixed: the flash is the reference, the tone only has to be easy to hear. */
+/** The beep pitch for the AV sync and timecode patterns. Fixed: the flash is the reference, the tone only has to be easy to hear. */
 const AV_BEEP_HZ = 1000;
 
 const avSyncTiming = (s: Required<PatternSettings>, loopTime: number) => {
@@ -925,8 +925,7 @@ export const PATTERNS: PatternDef[] = [
   { id: "timecode", name: "Timecode & Sync Flash", category: "Motion", animated: true, params: [
     { key: "fps", label: "Frame rate", type: "select", options: fpsOptions, default: "25" },
     { key: "beep", label: "Beep with the flash", type: "boolean", default: true },
-    { key: "beepFreq", label: "Beep pitch (Hz)", type: "number", min: 100, max: 8000, default: 1000 },
-  ], draw: drawTimecode, beeps: (s) => (s.beep ? [{ at: 0, freq: Number(s.beepFreq), duration: 1 / Math.max(1, Math.round(Number(s.fps))) }] : []) },
+  ], draw: drawTimecode, beeps: (s) => (s.beep ? [{ at: 0, freq: AV_BEEP_HZ, duration: 1 / Math.max(1, Math.round(Number(s.fps))) }] : []) },
   { id: "av-sync", name: "AV Sync Flash and Beep", category: "Motion", animated: true, params: [
     { key: "fps", label: "Frame rate", type: "select", options: fpsOptions, default: "60" },
     { key: "showMs", label: "Show measurements in milliseconds", type: "boolean", default: true },

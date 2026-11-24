@@ -291,6 +291,12 @@ export const fourScreenConfig = (): GeneratorConfig =>
     makeScreen(3, { name: "Screen 4", x: 1920, y: 1080, w: 1920, h: 1080, pattern: "faces" }),
   ]);
 
+/** One 1080p screen running the AV sync flash and beep - the sender for the Receive page. */
+export const avSyncCheckConfig = (): GeneratorConfig => ({
+  ...baseConfig({ w: 1920, h: 1080 }, [makeScreen(0, { name: "AV sync", x: 0, y: 0, w: 1920, h: 1080, pattern: "av-sync" })]),
+  name: "AV sync check",
+});
+
 /** What a new configuration starts as. */
 export const defaultConfig = (): GeneratorConfig => standard1080pConfig();
 
@@ -299,6 +305,7 @@ export type LayoutPreset = { id: string; name: string; description: string; buil
 /** Starting layouts, offered in the Configurations window. */
 export const LAYOUT_PRESETS: LayoutPreset[] = [
   { id: "standard-1080p", name: "Standard 1080p (16:9)", description: "One screen, 1920 × 1080", build: standard1080pConfig },
+  { id: "av-sync-check", name: "AV sync check", description: "One screen flashing and beeping once a second - the sender for the Receive page", build: avSyncCheckConfig },
   { id: "four-screens", name: "Four screens on 4K", description: "Four 1920 × 1080 screens on a 3840 × 2160 canvas", build: fourScreenConfig },
   { id: "empty", name: "Empty canvas", description: "3840 × 2160, no screens", build: () => baseConfig(LEGACY_CANVAS, []) },
 ];

@@ -14,6 +14,10 @@ Multi-Media Systems' browser-based test pattern generator for LED walls and scre
 
 The live output draws from the browser's own frame timestamp (`src/generator/frameClock.ts`), not `Date.now()`, so movement steps evenly. While the fullscreen output is up the editor stops drawing its hidden preview and stops its 4 Hz refresh, screens are drawn straight onto the output canvas, the playlist / auto-cycle config is built once per step, and the LED pattern's static labels and outlines are drawn once into a layer.
 
+## Receive (partner meter)
+
+`receive.html` is a second page, linked as **Receive** in the generator's header. Run the AV Sync Flash and Beep pattern on a screen (Configurations → **AV sync check**), point a phone or laptop at it, and Receive uses its camera and microphone to measure how far the picture and the sound are apart, in milliseconds. Detection logic is in `src/receive/sync.ts`; the microphone runs in an AudioWorklet (`toneWorklet.ts`); the camera and mic engine is `engine.ts`.
+
 ## Bouncing Multi logo
 
 Turn on **Bouncing logo** in the editor (live output only, never in downloads):
