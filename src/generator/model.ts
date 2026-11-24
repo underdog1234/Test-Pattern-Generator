@@ -695,7 +695,8 @@ export const normalizeScreen = (raw: unknown, index: number): SubScreen => {
     locked: bool(r.locked, false),
     visible: bool(r.visible, true),
     aspectLock: bool(r.aspectLock, false),
-    phase: num(r.phase, 0),
+    // The per-screen animation offset was removed; any saved value is dropped so nothing runs off-beat invisibly.
+    phase: 0,
     led: normalizeLed(r.led),
     ledLayout: normalizeLedLayout(r.ledLayout),
     input: typeof r.input === "number" ? r.input : null,

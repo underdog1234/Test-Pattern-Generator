@@ -70,7 +70,7 @@ const mod = (a: number, b: number) => ((a % b) + b) % b;
 
 export const patternInfoFor = (screen: SubScreen, time: number, rc: RenderContext): PatternInfo => {
   const loop = Math.max(0.001, rc.loopSeconds);
-  const loopTime = mod(time + (screen.phase || 0), loop);
+  const loopTime = mod(time, loop);
   return {
     progress: loopTime / loop,
     loopTime,

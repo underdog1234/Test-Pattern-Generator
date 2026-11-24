@@ -18,13 +18,13 @@ export type ScheduledBeep = Beep;
 
 const mod = (a: number, b: number) => ((a % b) + b) % b;
 
-/** The beeps one screen makes, moved onto the shared clock (its animation offset taken out). */
+/** The beeps one screen makes, on the shared clock. */
 export const screenBeeps = (screen: SubScreen, loopSeconds: number): ScheduledBeep[] => {
   if (!screen.visible) return [];
   const def = PATTERN_BY_ID.get(screen.pattern);
   if (!def?.beeps) return [];
   const loop = Math.max(0.001, loopSeconds);
-  return def.beeps(resolveSettings(def, screen.settings[def.id]), loop).map((b) => ({ ...b, at: mod(b.at - (screen.phase || 0), loop) }))
+  return def.beeps(resolveSettings(def, screen.settings[def.id]), loop).map((b) => ({ ...b, at: mod(b.at, loop) }))
     .sort((a, b) => a.at - b.at);
 };
 

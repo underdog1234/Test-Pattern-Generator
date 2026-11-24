@@ -330,9 +330,6 @@ export function Inspector({
             onCommit={(v) => onPatch({ motion: { ...screen.motion, passes: v } })}
           />
         </div>
-        {def.animated || screen.motion.direction !== "none" ? (
-          <NumField label="Animation offset (seconds)" value={screen.phase} integer={false} step={0.1} min={-3600} max={3600} onCommit={(v) => onPatch({ phase: v })} />
-        ) : null}
         {selectionCount > 1 ? <SmallButton onClick={onApplyPatternToSelection}>Use this pattern and settings on all {selectionCount} selected</SmallButton> : null}
       </div>
 

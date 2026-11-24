@@ -278,20 +278,36 @@ describe("photo faces", () => {
 describe("sync tones", () => {
   it("beeps with every AV sync flash, and lands each beep on its exact sample", async () => {
     const { screenBeeps, beepsBetween, renderBeepsWav } = await import("./audio");
-    const screen = makeScreen(0, { pattern: "av-sync", settings: { "av-sync": { fps: "25", interval: 2, flashFrames: 2, beepFreq: 110 } } });
+    const screen = makeScreen(0, { pattern: "av-sync", settings: { "av-sync": { fps: "25", interval: 2, flashFrames: 2 } } });
     const beeps = screenBeeps(screen, 10);
     expect(beeps.map((b) => b.at)).toEqual([0, 2, 4, 6, 8]);
     expect(beeps[0].duration).toBeCloseTo(0.08);
-    // A screen's animation offset moves its beeps with its flashes.
-    expect(screenBeeps({ ...screen, phase: 0.5 }, 10).map((b) => b.at)).toEqual([1.5, 3.5, 5.5, 7.5, 9.5]);
+    // The pitch is fixed, and the removed animation offset no longer moves anything.
+    expect(beeps.every((b) => b.freq === 1000)).toBe(true);
+    expect(screenBeeps({ ...screen, phase: 0.5 }, 10).map((b) => b.at)).toEqual([0, 2, 4, 6, 8]);
     expect(beepsBetween(beeps, 10, 9, 13).map((b) => b.time)).toEqual([10, 12]);
-    const wav = renderBeepsWav(beeps, 10, 3, 1000);
+    // 8 kHz so the 1 kHz tone is well below the limit; 0.08 s = 640 samples.
+    const wav = renderBeepsWav(beeps, 10, 3, 8000);
     const samples = new Int16Array(wav.buffer.slice(44));
-    expect(samples.length).toBe(3000);
-    expect(samples.slice(0, 80).some((v) => v !== 0)).toBe(true);
-    expect(samples.slice(80, 2000).every((v) => v === 0)).toBe(true);
-    expect(samples.slice(2000, 2080).some((v) => v !== 0)).toBe(true);
+    expect(samples.length).toBe(24000);
+    expect(samples.slice(0, 640).some((v) => v !== 0)).toBe(true);
+    expect(samples.slice(650, 16000).every((v) => v === 0)).toBe(true);
+    expect(samples.slice(16000, 16640).some((v) => v !== 0)).toBe(true);
     expect(screenBeeps(makeScreen(0, { pattern: "smpte" }), 10)).toEqual([]);
+  });
+});
+
+describe("AV sync pattern", () => {
+  it("defaults to 60 fps with measurements in milliseconds, no pitch setting", async () => {
+    const { PATTERN_BY_ID, resolveSettings } = await import("./patterns");
+    const def = PATTERN_BY_ID.get("av-sync")!;
+    const r = resolveSettings(def, undefined);
+    expect(r.fps).toBe("60");
+    expect(r.showMs).toBe(true);
+    expect(def.params.some((p) => p.key === "beepFreq")).toBe(false);
+  });
+  it("drops any saved animation offset", () => {
+    expect(normalizeConfig({ screens: [{ phase: 2.5 }] }).screens[0].phase).toBe(0);
   });
 });
 
