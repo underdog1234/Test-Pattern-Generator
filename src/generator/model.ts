@@ -260,17 +260,15 @@ export const defaultSnap = (): SnapSettings => ({
   threshold: 8,
 });
 
-export const defaultConfig = (): GeneratorConfig => ({
+/** The canvas size configs had before the Standard 1080p start layout; still the fallback for a saved file with no canvas. */
+const LEGACY_CANVAS = { w: 3840, h: 2160 };
+
+const baseConfig = (canvas: { w: number; h: number }, screens: SubScreen[]): GeneratorConfig => ({
   formatVersion: CONFIG_FORMAT_VERSION,
   app: "test-pattern-generator",
   name: "Untitled output",
-  canvas: { w: 3840, h: 2160, background: "#000000", aspectLock: false },
-  screens: [
-    makeScreen(0, { name: "Screen 1", x: 0, y: 0, w: 1920, h: 1080, pattern: "smpte" }),
-    makeScreen(1, { name: "Screen 2", x: 1920, y: 0, w: 1920, h: 1080, pattern: "grid" }),
-    makeScreen(2, { name: "Screen 3", x: 0, y: 1080, w: 1920, h: 1080, pattern: "led-moving", led: { cols: 12, rows: 6, panelPxW: 160, panelPxH: 180, panelName: "Custom" } }),
-    makeScreen(3, { name: "Screen 4", x: 1920, y: 1080, w: 1920, h: 1080, pattern: "faces" }),
-  ],
+  canvas: { ...canvas, background: "#000000", aspectLock: false },
+  screens,
   customPresets: [],
   snap: defaultSnap(),
   nudge: { step: 1, shiftStep: 10 },
@@ -279,6 +277,31 @@ export const defaultConfig = (): GeneratorConfig => ({
   autoCycle: defaultAutoCycle(),
   processor: { model: "", inputMode: "perEntry", wholeInput: null },
 });
+
+/** Standard 1080p (16:9): one 1920 x 1080 screen on a 1920 x 1080 canvas. */
+export const standard1080pConfig = (): GeneratorConfig =>
+  baseConfig({ w: 1920, h: 1080 }, [makeScreen(0, { name: "Screen 1", x: 0, y: 0, w: 1920, h: 1080, pattern: "smpte" })]);
+
+/** Four 1080p screens on a 4K canvas, one of each kind of pattern. */
+export const fourScreenConfig = (): GeneratorConfig =>
+  baseConfig(LEGACY_CANVAS, [
+    makeScreen(0, { name: "Screen 1", x: 0, y: 0, w: 1920, h: 1080, pattern: "smpte" }),
+    makeScreen(1, { name: "Screen 2", x: 1920, y: 0, w: 1920, h: 1080, pattern: "grid" }),
+    makeScreen(2, { name: "Screen 3", x: 0, y: 1080, w: 1920, h: 1080, pattern: "led-moving", led: { cols: 12, rows: 6, panelPxW: 160, panelPxH: 180, panelName: "Custom" } }),
+    makeScreen(3, { name: "Screen 4", x: 1920, y: 1080, w: 1920, h: 1080, pattern: "faces" }),
+  ]);
+
+/** What a new configuration starts as. */
+export const defaultConfig = (): GeneratorConfig => standard1080pConfig();
+
+export type LayoutPreset = { id: string; name: string; description: string; build: () => GeneratorConfig };
+
+/** Starting layouts, offered in the Configurations window. */
+export const LAYOUT_PRESETS: LayoutPreset[] = [
+  { id: "standard-1080p", name: "Standard 1080p (16:9)", description: "One screen, 1920 × 1080", build: standard1080pConfig },
+  { id: "four-screens", name: "Four screens on 4K", description: "Four 1920 × 1080 screens on a 3840 × 2160 canvas", build: fourScreenConfig },
+  { id: "empty", name: "Empty canvas", description: "3840 × 2160, no screens", build: () => baseConfig(LEGACY_CANVAS, []) },
+];
 
 export const screenRect = (s: { x: number; y: number; w: number; h: number }): Rect => ({ x: s.x, y: s.y, w: s.w, h: s.h });
 
@@ -719,8 +742,8 @@ export const normalizeConfig = (raw: unknown): GeneratorConfig => {
     app: "test-pattern-generator",
     name: str(r.name, base.name),
     canvas: {
-      w: clampDimension(num(canvas.w, base.canvas.w)),
-      h: clampDimension(num(canvas.h, base.canvas.h)),
+      w: clampDimension(num(canvas.w, LEGACY_CANVAS.w)),
+      h: clampDimension(num(canvas.h, LEGACY_CANVAS.h)),
       background: color(canvas.background, "#000000"),
       aspectLock: bool(canvas.aspectLock, false),
     },

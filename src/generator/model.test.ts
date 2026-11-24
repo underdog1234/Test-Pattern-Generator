@@ -7,6 +7,7 @@ import {
   autoCyclePatternAt,
   arrangeRects,
   defaultConfig,
+  fourScreenConfig,
   distributeRects,
   distributeWithGap,
   exportFileName,
@@ -167,7 +168,7 @@ describe("file names", () => {
 
 describe("saved configurations", () => {
   it("round-trips every screen's position, resolution, pattern, settings and layer order", () => {
-    const config = defaultConfig();
+    const config = fourScreenConfig();
     config.screens[2] = { ...config.screens[2], x: -7, y: 13, w: 333, h: 777, locked: true, settings: { grid: { spacing: 32 } }, pattern: "grid" };
     config.screens.reverse();
     const back = normalizeConfig(JSON.parse(JSON.stringify(config)));
@@ -235,7 +236,7 @@ describe("auto cycle", () => {
     expect(autoCyclePatternAt(ids, 5, 5)).toBe("b");
     expect(autoCyclePatternAt(ids, 16, 5)).toBe("a");
     expect(autoCyclePatternAt(ids, 0, 5, 2)).toBe("c");
-    const c = defaultConfig();
+    const c = fourScreenConfig();
     expect(applyAutoCycle(c, ids, 7)).toBe(c);
     c.autoCycle = { enabled: true, seconds: 5, stagger: true };
     expect(applyAutoCycle(c, ids, 7).screens.map((s) => s.pattern)).toEqual(["b", "c", "a", "b"]);

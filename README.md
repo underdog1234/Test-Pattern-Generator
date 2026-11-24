@@ -4,6 +4,12 @@ Multi-Media Systems' browser-based test pattern generator for LED walls and scre
 
 **Live:** https://underdog1234.github.io/Test-Pattern-Generator/
 
+## Starting point and playlists
+
+- New configurations start as **Standard 1080p (16:9)**: one screen, 1920 × 1080. Other starting layouts are in **Configurations**; saved setups are never changed.
+- **Output** has its own section: where the output goes (window, fullscreen), what it shows (bouncing logo, fit, status box) and sound. The bouncing logo is on by default; your toggles are remembered.
+- The Playlist panel has three built-in playlists, built for the screens in the current setup: **Quick screen check**, **Colour & greyscale checks** and **Alignment & geometry** (`src/generator/presets.ts`).
+
 ## Bouncing Multi logo
 
 Turn on **Bouncing logo** in the editor (live output only, never in downloads):

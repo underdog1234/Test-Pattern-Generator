@@ -102,7 +102,21 @@ export type OutputDisplay = {
   beepOffsetMs: number;
 };
 
-export const defaultDisplay = (): OutputDisplay => ({ logo: false, fit: false, status: true, beeps: false, beepOffsetMs: 0 });
+export const defaultDisplay = (): OutputDisplay => ({ logo: true, fit: false, status: true, beeps: false, beepOffsetMs: 0 });
+
+const DISPLAY_KEY = "testPatternGenerator:display:v1";
+
+/** The output toggles the user last chose in this browser, so a choice outlives a reload. Nothing saved = the defaults. */
+export const loadDisplayPrefs = (): Partial<OutputDisplay> => {
+  const raw = read(DISPLAY_KEY) as Record<string, unknown> | null;
+  const out: Partial<OutputDisplay> = {};
+  if (raw && typeof raw === "object") {
+    for (const k of ["logo", "fit", "status", "beeps"] as const) if (typeof raw[k] === "boolean") out[k] = raw[k] as boolean;
+  }
+  return out;
+};
+
+export const saveDisplayPrefs = (d: OutputDisplay) => write(DISPLAY_KEY, { logo: d.logo, fit: d.fit, status: d.status, beeps: d.beeps });
 
 export type OutputState = { config: GeneratorConfig; playback: Playback; display: OutputDisplay };
 

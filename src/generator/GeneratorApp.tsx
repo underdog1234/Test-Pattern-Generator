@@ -19,6 +19,7 @@ import {
   applyPlaylistStep,
   arrangeRects,
   boundsOf,
+  LAYOUT_PRESETS,
   defaultConfig,
   distributeRects,
   distributeWithGap,
@@ -38,7 +39,9 @@ import {
   type ResolutionPreset,
   type SubScreen,
 } from "./model";
+import OutputPanel from "./OutputPanel";
 import OutputView from "./OutputView";
+import { BUILT_IN_PLAYLISTS, buildBuiltInPlaylist } from "./presets";
 import { ArrangePanel, CanvasSettings, Inspector, PlaylistPanel, ScreenList, type AlignRef } from "./panels";
 import { loadLedModule } from "./render";
 import {
@@ -46,6 +49,8 @@ import {
   effectiveConfig,
   loadAutosave,
   loadCustomPresets,
+  loadDisplayPrefs,
+  saveDisplayPrefs,
   loadSavedConfigs,
   openChannel,
   playbackTime,
@@ -156,8 +161,12 @@ export default function GeneratorApp() {
   }, [config.screens]);
 
   // How the output shows itself (logo, fit, status box, output-window beeps).
-  const [display, setDisplay] = useState<OutputDisplay>(defaultDisplay);
+  const [display, setDisplay] = useState<OutputDisplay>(() => ({ ...defaultDisplay(), ...loadDisplayPrefs() }));
   const patchDisplay = (patch: Partial<OutputDisplay>) => setDisplay((d) => ({ ...d, ...patch }));
+  // Remember the output toggles for next time (a fresh browser starts from the defaults).
+  useEffect(() => {
+    saveDisplayPrefs(display);
+  }, [display]);
   // What the separate output window last reported about itself.
   const [outputStatus, setOutputStatus] = useState<{ fullscreen: boolean; oneToOne: boolean; at: number } | null>(null);
 
@@ -426,11 +435,18 @@ export default function GeneratorApp() {
     }
   };
 
-  const openDefaultProject = () => {
-    const c = { ...defaultConfig(), customPresets: configRef.current.customPresets };
-    commit(c, true);
-    setSelectedIds([c.screens[0].id]);
-    flash("Opened the default project (4 screens). Undo goes back to what was here.");
+  const loadBuiltInPlaylist = (id: string) => {
+    const def = BUILT_IN_PLAYLISTS.find((p) => p.id === id);
+    if (!def) return;
+    const steps = buildBuiltInPlaylist(configRef.current, def);
+    if (!steps.length) {
+      flash("Add a screen first - built-in playlists run on the screens in this setup.");
+      return;
+    }
+    if (configRef.current.playlist.length && !window.confirm(`Replace the ${configRef.current.playlist.length} steps in the current playlist with "${def.name}"? Undo brings them back.`)) return;
+    update((c) => ({ ...c, playlist: steps }));
+    setPlayback((p) => ({ ...p, playlist: { ...p.playlist, active: false } }));
+    flash(`Loaded the "${def.name}" playlist (${steps.length} steps). Press Play playlist to run it.`);
   };
 
   // Opened from the planner's Test Pattern Generator button: bring its
@@ -554,36 +570,18 @@ export default function GeneratorApp() {
           Planner project
         </SmallButton>
         <SmallButton onClick={() => plannerRef.current?.click()} title="Open a project saved by the LED Cabling Planner: its Output Canvas and sub-screens come across">Import LED Planner project</SmallButton>
-        <SmallButton onClick={openDefaultProject} title="Start again from the default four-screen setup">Default project</SmallButton>
         <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, false); e.target.value = ""; }} />
         <input ref={plannerRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, true); e.target.value = ""; }} />
         <span className="mx-1 h-5 w-px bg-slate-700" />
-        <div className="w-48">
-          <SelectField value={outputTarget} onChange={setOutputTarget}>
-            <option value="__canvas">Output: entire canvas</option>
-            {config.screens.map((s) => (
-              <option key={s.id} value={s.id}>Output: {s.name}</option>
-            ))}
-          </SelectField>
-        </div>
-        <SmallButton onClick={() => void openOutputWindow()} title="Open the output in its own window, on any display">Output window</SmallButton>
-        <SmallButton
-          onClick={() => {
-            setInlineOutput({ screenId: outputTarget === "__canvas" ? null : outputTarget });
-            document.documentElement.requestFullscreen?.().catch(() => {});
-          }}
-        >
-          Fullscreen
-        </SmallButton>
-        <SmallButton tone="primary" onClick={() => setShowExport(true)}>Download…</SmallButton>
-        <a className="ml-auto text-xs text-sky-300 hover:underline" href={location.pathname.replace(/generator\.html$/, "")}>LED Cabling Planner ↗</a>
+        <SmallButton tone="primary" onClick={() => setShowExport(true)} title="Save images, a PDF or a video of the patterns">Download…</SmallButton>
+        <a className="ml-auto text-xs text-sky-300 hover:underline" href="https://script.google.com/macros/s/AKfycbwsrCoqVwHdQHYPUDIDGv64vjwTF4DfAngFZ0KwUWANx6ZaL2EmRquxgYRIWcQYSCS4/exec" target="_blank" rel="noopener noreferrer">MMS Links ↗</a>
       </header>
 
       <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <main className="min-w-0 space-y-3">
           <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="w-14 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Playback</span>
+              <span className="w-20 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Playback</span>
               <SmallButton active={playback.playing} onClick={() => setPlaying(true)} title="Play (Space toggles)">▶ Play</SmallButton>
               <SmallButton active={!playback.playing} onClick={() => setPlaying(false)} title="Pause (Space toggles)">❚❚ Pause</SmallButton>
               <SmallButton onClick={restart} title="Back to the start of the loop">⏮ Restart</SmallButton>
@@ -613,42 +611,18 @@ export default function GeneratorApp() {
               ) : null}
               <span className="ml-auto text-xs text-slate-400">{selectedIds.length ? `${selectedIds.length} selected` : "Nothing selected"}</span>
             </div>
-            <div className="flex flex-wrap items-center gap-2 border-t border-slate-800 pt-2">
-              <span className="w-14 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Output</span>
-              <SmallButton onClick={goFullscreen} title="Show the output full screen on this display (Esc closes it)">⛶ Fullscreen</SmallButton>
-              <SmallButton active={display.logo} onClick={() => patchDisplay({ logo: !display.logo })} title="A logo bouncing round inside every sub-screen, on the live output only - never in a download">
-                Bouncing logo
-              </SmallButton>
-              <SmallButton active={display.fit} onClick={() => patchDisplay({ fit: !display.fit })} title="Scale the output to fill the display instead of showing it 1:1">
-                Fit to display
-              </SmallButton>
-              <SmallButton active={display.status} onClick={() => patchDisplay({ status: !display.status })} title="The box in the corner of the output with its resolution and 1:1 check">
-                Status box
-              </SmallButton>
-              {outputWindowLive ? (
-                outputStatus!.fullscreen ? (
-                  <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Output window is fullscreen{outputStatus!.oneToOne ? " and 1:1" : ""}</span>
-                ) : (
-                  <span className="rounded border border-amber-400/70 bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-200" title="Browsers only allow fullscreen from a click in that window: click the yellow banner on the output display">
-                    ⚠ Output window is not fullscreen - click the banner on that display
-                  </span>
-                )
-              ) : null}
-              <span className="mx-1 h-5 w-px bg-slate-700" />
-              <Check checked={sound.enabled} onChange={sound.setEnabled} title="Play the timecode and AV sync beeps from this window, in step with the flashes">
-                🔊 Beeps here
-              </Check>
-              <Check checked={display.beeps} onChange={(v) => patchDisplay({ beeps: v })} title="Play the beeps from the separate output window instead (or as well)">
-                🔊 Beeps in output window
-              </Check>
-              <label className="flex items-center gap-1 text-xs text-slate-400" title="Moves every beep later (positive) or earlier (negative) by this many milliseconds, to line the sound up with a display or processor that shows the picture late">
-                Beep delay
-                <NumField className="w-20" value={sound.offsetMs} min={-1000} max={1000} onCommit={sound.setOffsetMs} />
-                ms
-              </label>
-              {(sound.enabled && sound.blocked && sound.active) ? <span className="text-xs text-amber-300">Click anywhere to allow sound</span> : null}
-            </div>
           </div>
+          <OutputPanel
+            config={config}
+            target={outputTarget}
+            onTarget={setOutputTarget}
+            onOpenWindow={() => void openOutputWindow()}
+            onFullscreen={goFullscreen}
+            display={display}
+            onDisplay={patchDisplay}
+            windowStatus={outputWindowLive ? { fullscreen: outputStatus!.fullscreen, oneToOne: outputStatus!.oneToOne } : null}
+            sound={sound}
+          />
           <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
             <CanvasEditor
               config={config}
@@ -691,16 +665,6 @@ export default function GeneratorApp() {
             onPatch={(id, patch) => patchScreen(id, patch)}
             onLayer={layer}
           />
-          <ArrangePanel
-            config={config}
-            selectedIds={selectedIds}
-            onAlign={align}
-            onDistribute={distribute}
-            onSpace={space}
-            onArrange={arrange}
-            onMatchSize={matchSize}
-            onNudge={(step, shiftStep) => update((c) => ({ ...c, nudge: { step, shiftStep } }))}
-          />
           {primary ? (
             <Inspector
               key={primary.id}
@@ -722,6 +686,16 @@ export default function GeneratorApp() {
               onSavePreset={savePreset}
             />
           ) : null}
+          <ArrangePanel
+            config={config}
+            selectedIds={selectedIds}
+            onAlign={align}
+            onDistribute={distribute}
+            onSpace={space}
+            onArrange={arrange}
+            onMatchSize={matchSize}
+            onNudge={(step, shiftStep) => update((c) => ({ ...c, nudge: { step, shiftStep } }))}
+          />
           <PlaylistPanel
             config={config}
             activeIndex={playback.playlist.active ? activeStep : null}
@@ -750,6 +724,7 @@ export default function GeneratorApp() {
             onPlay={playPlaylist}
             onStop={() => setPlayback((p) => ({ ...p, playlist: { ...p.playlist, active: false } }))}
             onLoopChange={(v) => setPlayback((p) => ({ ...p, playlist: { ...p.playlist, loop: v } }))}
+            onLoadBuiltIn={loadBuiltInPlaylist}
           />
         </aside>
       </div>
@@ -764,16 +739,12 @@ export default function GeneratorApp() {
             setShowConfigs(false);
             flash(`Loaded "${c.name}".`);
           }}
-          onNew={() => {
-            commit({ ...defaultConfig(), screens: [], customPresets: configRef.current.customPresets, name: "Untitled output" }, true);
-            setSelectedIds([]);
-            setShowConfigs(false);
-          }}
-          onExample={() => {
-            const c = { ...defaultConfig(), customPresets: configRef.current.customPresets };
+          onLayout={(preset) => {
+            const c = { ...preset.build(), customPresets: configRef.current.customPresets };
             commit(c, true);
-            setSelectedIds([c.screens[0].id]);
+            setSelectedIds(c.screens[0] ? [c.screens[0].id] : []);
             setShowConfigs(false);
+            flash(`Started from "${preset.name}". Undo goes back to what was here.`);
           }}
           onClose={() => setShowConfigs(false)}
         />
@@ -807,14 +778,12 @@ export default function GeneratorApp() {
 function ConfigsDialog({
   config,
   onLoad,
-  onNew,
-  onExample,
+  onLayout,
   onClose,
 }: {
   config: GeneratorConfig;
   onLoad: (c: GeneratorConfig) => void;
-  onNew: () => void;
-  onExample: () => void;
+  onLayout: (preset: (typeof LAYOUT_PRESETS)[number]) => void;
   onClose: () => void;
 }) {
   const [list, setList] = useState<SavedConfig[]>(loadSavedConfigs);
@@ -869,11 +838,17 @@ function ConfigsDialog({
             <div className="text-xs text-slate-400">Nothing saved in this browser yet.</div>
           )}
         </div>
-        <div className="mt-4 flex flex-wrap justify-between gap-2">
-          <div className="flex gap-2">
-            <SmallButton onClick={onNew}>New empty canvas</SmallButton>
-            <SmallButton onClick={onExample}>Load example (4 screens)</SmallButton>
+        <div className="mt-4 border-t border-slate-700 pt-3">
+          <div className="mb-1 text-sm font-semibold">Start a new setup from a layout</div>
+          <div className="flex flex-wrap gap-2">
+            {LAYOUT_PRESETS.map((preset) => (
+              <SmallButton key={preset.id} onClick={() => onLayout(preset)} title={preset.description}>
+                {preset.name}
+              </SmallButton>
+            ))}
           </div>
+        </div>
+        <div className="mt-4 flex justify-end">
           <SmallButton onClick={onClose}>Close</SmallButton>
         </div>
       </div>

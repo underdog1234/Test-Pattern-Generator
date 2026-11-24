@@ -1,5 +1,6 @@
 // Side panels of the generator: the sub-screen list, the inspector for the
 // selected screen, arrange/align tools, canvas settings and the playlist.
+import { BUILT_IN_PLAYLISTS, playlistLength } from "./presets";
 import React, { useState } from "react";
 import { PROCESSOR_MODEL_IDS, PROCESSOR_SPECS } from "../novastar/processorModels";
 import { Check, ColorField, Label, NumField, Panel, SelectField, SmallButton, TextField } from "./controls";
@@ -259,7 +260,7 @@ export function Inspector({
   const [panelPreset, setPanelPreset] = useState("");
   const spec = config.processor.model ? PROCESSOR_SPECS[config.processor.model] : null;
   return (
-    <Panel title={<span>Screen: <span style={{ color: screen.color }}>{screen.name}</span>{selectionCount > 1 ? <span className="text-slate-400"> (+{selectionCount - 1} more selected)</span> : null}</span>}>
+    <Panel title={<span>Screen settings: <span style={{ color: screen.color }}>{screen.name}</span>{selectionCount > 1 ? <span className="text-slate-400"> (+{selectionCount - 1} more selected)</span> : null}</span>}>
       <div className="grid grid-cols-[1fr_auto] items-end gap-2">
         <TextField label="Name" value={screen.name} onCommit={(v) => onPatch({ name: v.trim() || screen.name })} />
         <ColorField value={screen.color} onChange={(v) => onPatch({ color: v })} />
@@ -688,6 +689,7 @@ export function PlaylistPanel({
   onPlay,
   onStop,
   onLoopChange,
+  onLoadBuiltIn,
 }: {
   config: GeneratorConfig;
   activeIndex: number | null;
@@ -702,10 +704,21 @@ export function PlaylistPanel({
   onPlay: () => void;
   onStop: () => void;
   onLoopChange: (v: boolean) => void;
+  onLoadBuiltIn: (id: string) => void;
 }) {
   const total = config.playlist.reduce((s, p) => s + p.duration, 0);
   return (
-    <Panel title={`Playlist (${config.playlist.length} steps${total ? `, ${total}s` : ""})`} defaultOpen={false}>
+    <Panel title={`Playlist (${config.playlist.length} steps${total ? `, ${total}s` : ""})`} defaultOpen>
+      <div className="space-y-1">
+        <div className="text-xs font-semibold text-slate-300">Built-in playlists</div>
+        <div className="flex flex-wrap gap-1">
+          {BUILT_IN_PLAYLISTS.map((p) => (
+            <SmallButton key={p.id} onClick={() => onLoadBuiltIn(p.id)} title={`${p.description} (${playlistLength(p)}s, ${p.steps.length} steps) - runs on every screen`}>
+              {p.name}
+            </SmallButton>
+          ))}
+        </div>
+      </div>
       <div className="text-xs text-slate-400">Each step remembers the pattern and settings of every screen. Playing steps through them on the editor and every output window.</div>
       <div className="flex flex-wrap gap-1">
         <SmallButton tone="primary" onClick={onCapture}>+ Add step from current patterns</SmallButton>
