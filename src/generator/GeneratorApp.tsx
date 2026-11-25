@@ -11,7 +11,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ScreenPickerModal from "../testPattern/ScreenPickerModal";
 import { isMultiScreenLikely, openWindowOnScreen, requestScreenDetails } from "../testPattern/screenPlacement";
 import CanvasEditor from "./CanvasEditor";
-import { Check, NumField, SelectField, SmallButton, TextField } from "./controls";
+import { Check, NumField, Panel, SelectField, SmallButton, TextField } from "./controls";
+import Walkthrough from "./Walkthrough";
 import ExportDialog from "./ExportDialog";
 import { importPlannerProject, looksLikePlannerProject } from "./ledImport";
 import {
@@ -95,6 +96,7 @@ export default function GeneratorApp() {
   const [now, setNow] = useState(Date.now());
   const [showExport, setShowExport] = useState(false);
   const [showConfigs, setShowConfigs] = useState(false);
+  const [showTour, setShowTour] = useState(false);
   const [inlineOutput, setInlineOutput] = useState<{ screenId: string | null } | null>(null);
   const [outputTarget, setOutputTarget] = useState<string>("__canvas");
   const [screenPicker, setScreenPicker] = useState<{ screens: ScreenDetailed[]; url: string } | null>(null);
@@ -601,7 +603,7 @@ export default function GeneratorApp() {
 
   const warnings = useMemo(() => layoutWarnings(config), [config]);
   const primary = config.screens.find((s) => s.id === selectedIds[selectedIds.length - 1]) ?? null;
-  const editorMaxHeight = Math.max(260, Math.round(window.innerHeight * 0.62));
+  const editorMaxHeight = Math.max(260, Math.round(window.innerHeight * 0.5));
 
   return (
     <div className="min-h-screen text-slate-100">
@@ -613,18 +615,73 @@ export default function GeneratorApp() {
         <SmallButton onClick={undo} disabled={!past.current.length} title="Undo (Ctrl+Z)">↶ Undo</SmallButton>
         <SmallButton onClick={redo} disabled={!future.current.length} title="Redo (Ctrl+Y)">↷ Redo</SmallButton>
         <span className="mx-1 h-5 w-px bg-slate-700" />
-        <SmallButton onClick={() => setShowConfigs(true)}>Configurations</SmallButton>
+        <span data-panel="configuration" className="inline-flex rounded-md"><SmallButton onClick={() => setShowConfigs(true)}>Configurations</SmallButton></span>
         <SmallButton onClick={saveFile}>Save file</SmallButton>
         <SmallButton onClick={() => fileRef.current?.click()}>Open file</SmallButton>
         <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, false); e.target.value = ""; }} />
         <span className="mx-1 h-5 w-px bg-slate-700" />
         <SmallButton tone="primary" onClick={() => setShowExport(true)} title="Save images, a PDF or a video of the patterns">Download…</SmallButton>
-        <a className="ml-auto text-xs font-semibold text-sky-300 hover:underline" href="./receive.html" target="_blank" rel="noopener" title="Open the AV Sync Test receiver: measure audio / video sync with this device's camera and microphone">AV Sync Test ↗</a>
+        <SmallButton className="ml-auto" tone="primary" onClick={() => setShowTour(true)} title="A step-by-step tour of the main panels">? Help</SmallButton>
+        <a className="text-xs font-semibold text-sky-300 hover:underline" href="./receive.html" target="_blank" rel="noopener" title="Open the AV Sync Test receiver: measure audio / video sync with this device's camera and microphone">AV Sync Test ↗</a>
         <a className="text-xs text-sky-300 hover:underline" href="https://script.google.com/macros/s/AKfycbwsrCoqVwHdQHYPUDIDGv64vjwTF4DfAngFZ0KwUWANx6ZaL2EmRquxgYRIWcQYSCS4/exec" target="_blank" rel="noopener noreferrer">MMS Links ↗</a>
       </header>
 
-      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,34rem)_minmax(0,1fr)]">
-        <aside className="order-2 min-w-0 space-y-2 xl:order-1 xl:sticky xl:top-16 xl:max-h-[calc(100vh-5rem)] xl:self-start xl:overflow-y-auto xl:pr-1">
+      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,46rem)_minmax(0,1fr)]">
+        <div className="min-w-0 space-y-2 xl:sticky xl:top-16 xl:max-h-[calc(100vh-5rem)] xl:self-start xl:overflow-y-auto xl:pr-1">
+          <Panel id="preview" defaultOpen title="Preview">
+          <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="w-20 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Playback</span>
+              <SmallButton active={playback.playing} onClick={() => setPlaying(true)} title="Play (Space toggles)">▶ Play</SmallButton>
+              <SmallButton active={!playback.playing} onClick={() => setPlaying(false)} title="Pause (Space toggles)">❚❚ Pause</SmallButton>
+              <SmallButton onClick={restart} title="Back to the start of the loop">⏮ Restart</SmallButton>
+              <span className="font-mono text-xs text-slate-300">
+                {(currentTime % config.loopSeconds).toFixed(1)}s / {config.loopSeconds}s loop
+              </span>
+              <span className="mx-1 h-5 w-px bg-slate-700" />
+              <Check
+                checked={config.autoCycle.enabled}
+                onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, enabled: v } }))}
+                title="Step every screen through all the test patterns in turn (a running playlist takes over while it plays)"
+              >
+                Auto cycle all patterns
+              </Check>
+              {config.autoCycle.enabled ? (
+                <>
+                  <span className="text-xs text-slate-400">change every</span>
+                  <NumField className="w-16" value={config.autoCycle.seconds} min={1} max={3600} title="Seconds each pattern stays up" onCommit={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, seconds: v } }))} />
+                  <span className="text-xs text-slate-400">seconds</span>
+                  <Check checked={config.autoCycle.stagger} onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, stagger: v } }))} title="Each screen starts one pattern further on, so they all show something different">
+                    Different per screen
+                  </Check>
+                </>
+              ) : null}
+              {playback.playlist.active && activeStep !== null ? (
+                <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Playlist: {config.playlist[activeStep]?.name}</span>
+              ) : null}
+              <span className="ml-auto text-xs text-slate-400">{selectedIds.length ? `${selectedIds.length} selected` : "Nothing selected"}</span>
+            </div>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
+            <CanvasEditor
+              config={config}
+              frameSource={frameSource}
+              selectedIds={selectedIds}
+              onSelect={setSelectedIds}
+              onBeginEdit={beginEdit}
+              onRects={setRects}
+              maxHeight={editorMaxHeight}
+              paused={!!inlineOutput}
+            />
+          </div>
+          {warnings.length ? (
+            <div className="rounded-lg border border-amber-400/70 bg-amber-500/10 p-2 text-xs text-amber-200">
+              {warnings.map((w, i) => (
+                <div key={i}>⚠ {w}</div>
+              ))}
+            </div>
+          ) : null}
+          </Panel>
           <OutputPanel
             config={config}
             target={outputTarget}
@@ -645,6 +702,19 @@ export default function GeneratorApp() {
             onCloseQr={closeQr}
             onShowQr={showQr}
           />
+        </div>
+
+        <aside className="min-w-0 space-y-2">
+          <CanvasSettings
+              part="canvas"
+              config={config}
+              update={(fn) => update(fn)}
+              onSavePreset={savePreset}
+              onDeletePreset={deletePreset}
+              warnings={[]}
+              hasSelection={selectedIds.length > 0}
+              onLedApply={applyLed}
+            />
           <ScreenList
             config={config}
             selectedIds={selectedIds}
@@ -719,6 +789,7 @@ export default function GeneratorApp() {
             onLoadBuiltIn={loadBuiltInPlaylist}
           />
           <CanvasSettings
+              part="tools"
               config={config}
               update={(fn) => update(fn)}
               onSavePreset={savePreset}
@@ -728,63 +799,17 @@ export default function GeneratorApp() {
               onLedApply={applyLed}
             />
         </aside>
-
-        <main className="order-1 min-w-0 space-y-3 xl:order-2">
-          <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="w-20 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Playback</span>
-              <SmallButton active={playback.playing} onClick={() => setPlaying(true)} title="Play (Space toggles)">▶ Play</SmallButton>
-              <SmallButton active={!playback.playing} onClick={() => setPlaying(false)} title="Pause (Space toggles)">❚❚ Pause</SmallButton>
-              <SmallButton onClick={restart} title="Back to the start of the loop">⏮ Restart</SmallButton>
-              <span className="font-mono text-xs text-slate-300">
-                {(currentTime % config.loopSeconds).toFixed(1)}s / {config.loopSeconds}s loop
-              </span>
-              <span className="mx-1 h-5 w-px bg-slate-700" />
-              <Check
-                checked={config.autoCycle.enabled}
-                onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, enabled: v } }))}
-                title="Step every screen through all the test patterns in turn (a running playlist takes over while it plays)"
-              >
-                Auto cycle all patterns
-              </Check>
-              {config.autoCycle.enabled ? (
-                <>
-                  <span className="text-xs text-slate-400">change every</span>
-                  <NumField className="w-16" value={config.autoCycle.seconds} min={1} max={3600} title="Seconds each pattern stays up" onCommit={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, seconds: v } }))} />
-                  <span className="text-xs text-slate-400">seconds</span>
-                  <Check checked={config.autoCycle.stagger} onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, stagger: v } }))} title="Each screen starts one pattern further on, so they all show something different">
-                    Different per screen
-                  </Check>
-                </>
-              ) : null}
-              {playback.playlist.active && activeStep !== null ? (
-                <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Playlist: {config.playlist[activeStep]?.name}</span>
-              ) : null}
-              <span className="ml-auto text-xs text-slate-400">{selectedIds.length ? `${selectedIds.length} selected` : "Nothing selected"}</span>
-            </div>
-          </div>
-          <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
-            <CanvasEditor
-              config={config}
-              frameSource={frameSource}
-              selectedIds={selectedIds}
-              onSelect={setSelectedIds}
-              onBeginEdit={beginEdit}
-              onRects={setRects}
-              maxHeight={editorMaxHeight}
-              paused={!!inlineOutput}
-            />
-          </div>
-          {warnings.length ? (
-            <div className="rounded-lg border border-amber-400/70 bg-amber-500/10 p-2 text-xs text-amber-200">
-              {warnings.map((w, i) => (
-                <div key={i}>⚠ {w}</div>
-              ))}
-            </div>
-          ) : null}
-        </main>
       </div>
 
+      {showTour ? (
+        <Walkthrough
+          onClose={() => setShowTour(false)}
+          onStep={(step) => {
+            // The test patterns live with a screen's settings, so make sure one is selected.
+            if (step.id === "patterns" && !selectedIds.length && configRef.current.screens[0]) setSelectedIds([configRef.current.screens[0].id]);
+          }}
+        />
+      ) : null}
       {showExport ? <ExportDialog config={config} selectedIds={selectedIds} currentTime={currentTime} onClose={() => setShowExport(false)} /> : null}
       {showConfigs ? (
         <ConfigsDialog

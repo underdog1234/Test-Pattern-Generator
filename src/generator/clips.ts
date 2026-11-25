@@ -86,30 +86,25 @@ const sweepClip = (): ClipData => {
   return { rate: RATE, channels: [x, x.slice()] };
 };
 
-/** The left-to-right stereo sweep: a pulsing tone that moves from the left speaker to the right. */
-export const PAN = { seconds: 6, hz: 523.25 };
+/** The left-to-right stereo sweep: the same pink noise as the in-phase and out-of-phase tests, panned across from left to right. */
+export const PAN = { seconds: 6 };
 
 /** How far right the sound is, 0 (all left) to 1 (all right), `t` seconds into the clip. */
 export const panPosition = (t: number): number => Math.max(0, Math.min(1, t / PAN.seconds));
 
 const panClip = (): ClipData => {
-  const n = Math.round(PAN.seconds * RATE);
+  const noise = pinkNoise(PAN.seconds); // same generator and seed as the phase tests
+  const n = noise.length;
   const l = new Float32Array(n);
   const r = new Float32Array(n);
   for (let i = 0; i < n; i += 1) {
-    const t = i / RATE;
-    const w = 2 * Math.PI * PAN.hz * t;
-    // A tone with a few harmonics, pulsing five times a second so the ear can place it.
-    const tone = Math.sin(w) + 0.4 * Math.sin(2 * w) + 0.2 * Math.sin(3 * w);
-    const pulse = 0.35 + 0.65 * (0.5 - 0.5 * Math.cos(2 * Math.PI * 5 * t));
-    const theta = panPosition(t) * (Math.PI / 2); // constant power: the loudness stays level while it moves
-    const v = tone * pulse;
-    l[i] = v * Math.cos(theta);
-    r[i] = v * Math.sin(theta);
+    const theta = panPosition(i / RATE) * (Math.PI / 2); // constant power: the loudness stays level while it moves
+    l[i] = noise[i] * Math.cos(theta);
+    r[i] = noise[i] * Math.sin(theta);
   }
   fade(l, RATE, 0.05);
   fade(r, RATE, 0.05);
-  normalise([l, r], 0.9);
+  normalise([l, r], 0.8);
   return { rate: RATE, channels: [l, r] };
 };
 

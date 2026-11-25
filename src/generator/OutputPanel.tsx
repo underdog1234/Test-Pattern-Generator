@@ -40,7 +40,7 @@ const Group = ({ label, children, wide }: { label: string; children: React.React
 
 export default function OutputPanel({ config, target, onTarget, onOpenWindow, onFullscreen, display, onDisplay, windowStatus, sound, world, worldSync, onLockWorld, onUnlockWorld, pairing, onStartPairing, onStopPairing, onCloseQr, onShowQr }: Props) {
   return (
-    <Panel id="output" title="Output">
+    <Panel id="output" defaultOpen title="Output Display">
       <div className="grid gap-x-4 gap-y-3 sm:grid-cols-2">
       <Group label="Send to">
         <div className="w-full">

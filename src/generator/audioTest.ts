@@ -60,7 +60,7 @@ export const AUDIO_STEPS: AudioStep[] = [
   },
   {
     id: "pan", short: "Left to right", title: "LEFT TO RIGHT SWEEP", seconds: 9,
-    detail: "A tone that glides from the left speaker to the right. It should move smoothly across the middle, with no jumps and no change in loudness.",
+    detail: "The same noise as the phase tests, gliding from the left speaker to the right. It should move smoothly across the middle, with no jumps and no change in loudness.",
     events: [
       voice("speech-pan", 2.2, ["L", "R"], "LR"),
       { at: 2.6, dur: PAN.seconds, sides: ["L", "R"], kind: "pan", beep: { freq: 0, duration: PAN.seconds, clip: "pan-sweep" } },
@@ -145,7 +145,7 @@ export const enabledSeconds = (s: Settings): number =>
   AUDIO_STEPS.filter((st) => s[audioStepKey(st.id)] !== false).reduce((n, st) => n + st.seconds, 0);
 
 /** How loud each kind of sound is played, relative to the volume setting. */
-const LEVEL: Record<StepEvent["kind"], number> = { voice: 1, pulse: 0.5, noise: 0.9, music: 0.9, sweep: 0.35, pan: 0.6 };
+const LEVEL: Record<StepEvent["kind"], number> = { voice: 1, pulse: 0.5, noise: 0.9, music: 0.9, sweep: 0.35, pan: 0.9 };
 
 /** The sounds of the test, placed on the loop. Only whole sounds that fit before the loop restarts are used. */
 export const audioTestBeeps: NonNullable<PatternDef["beeps"]> = (s, loopSeconds) => {

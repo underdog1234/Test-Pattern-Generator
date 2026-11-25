@@ -250,15 +250,14 @@ function AudioTestList({
   const held = String(settings.hold ?? "");
   const ticked = AUDIO_STEPS.filter((st) => settings[audioStepKey(st.id)] !== false);
   const total = enabledSeconds(settings);
-  // The loop follows the ticked tests, unless it was set to something else on purpose.
+  // The loop is always as long as the ticked tests, so each one plays in full before the run repeats.
   const tick = (id: string, on: boolean) => {
     const next = { ...settings, [audioStepKey(id)]: on };
     const patch: Record<string, number | string | boolean> = { [audioStepKey(id)]: on };
     if (!on && held === id) patch.hold = "";
     onSettings(patch);
-    const fits = Math.abs(loopSeconds - total) < 0.01;
     const newTotal = enabledSeconds(next);
-    if (fits && newTotal > 0) onLoopSeconds(newTotal);
+    if (newTotal > 0 && Math.abs(newTotal - loopSeconds) > 0.01) onLoopSeconds(newTotal);
   };
   const setAll = (on: boolean) => {
     const patch: Record<string, number | string | boolean> = {};
@@ -266,7 +265,7 @@ function AudioTestList({
     if (!on) patch.hold = "";
     onSettings(patch);
     const newTotal = on ? AUDIO_TEST_SECONDS : 0;
-    if (Math.abs(loopSeconds - total) < 0.01 && newTotal > 0) onLoopSeconds(newTotal);
+    if (newTotal > 0 && Math.abs(newTotal - loopSeconds) > 0.01) onLoopSeconds(newTotal);
   };
   return (
     <div className="space-y-1.5 rounded-lg border border-slate-700 bg-slate-950/40 p-2">
@@ -396,7 +395,7 @@ export function Inspector({
         </div>
       </Panel>
 
-      <div className="space-y-2 rounded-lg border border-slate-700 p-2">
+      <Panel title={`Test patterns - ${def.name}`} level="sub" id="inspector-patterns">
         <PatternPicker value={screen.pattern} onChange={(id) => onPatch({ pattern: id })} allowLedLayout={!!screen.ledLayout} />
         {screen.pattern === LED_LAYOUT_PATTERN_ID ? (
           <div className="text-xs text-slate-400">
@@ -435,18 +434,17 @@ export function Inspector({
           />
         </div>
         {selectionCount > 1 ? <SmallButton onClick={onApplyPatternToSelection}>Use this pattern and settings on all {selectionCount} selected</SmallButton> : null}
-      </div>
+      </Panel>
 
-      <div className="rounded-lg border border-slate-700 p-2">
-        <Label>Overlays (exported with the screen)</Label>
-        <div className="mt-1 grid grid-cols-2 gap-1">
+      <Panel title="Overlays (exported with the screen)" level="sub" id="inspector-overlays">
+        <div className="grid grid-cols-2 gap-1">
           <Check checked={screen.overlays.border} onChange={(v) => onPatch({ overlays: { ...screen.overlays, border: v } })}>Border</Check>
           <Check checked={screen.overlays.label} onChange={(v) => onPatch({ overlays: { ...screen.overlays, label: v } })}>Name label</Check>
           <Check checked={screen.overlays.resolution} onChange={(v) => onPatch({ overlays: { ...screen.overlays, resolution: v } })}>Resolution & position</Check>
           <Check checked={screen.overlays.crosshair} onChange={(v) => onPatch({ overlays: { ...screen.overlays, crosshair: v } })}>Centre crosshair</Check>
           <Check checked={screen.overlays.clock} onChange={(v) => onPatch({ overlays: { ...screen.overlays, clock: v } })} title="Analogue clock with a seconds hand and the time in digits, top right">Clock</Check>
         </div>
-      </div>
+      </Panel>
     </Panel>
   );
 }
@@ -569,7 +567,10 @@ export function CanvasSettings({
   warnings,
   hasSelection,
   onLedApply,
+  part,
 }: {
+  /** "canvas" is the Main canvas panel; "tools" is Snapping and the LED calculator. */
+  part: "canvas" | "tools";
   config: GeneratorConfig;
   update: (fn: (c: GeneratorConfig) => GeneratorConfig) => void;
   onSavePreset: (p: ResolutionPreset) => void;
@@ -593,7 +594,8 @@ export function CanvasSettings({
   const ledInfo = { cols: ledCols, rows: ledRows, panelPxW: pw, panelPxH: ph, panelName: useCustom ? "Custom" : ledPanel.name };
   return (
     <>
-      <Panel id="canvas" title={`Main canvas - ${c.w} × ${c.h}`}>
+      {part === "canvas" ? (
+      <Panel id="canvas" defaultOpen title={`Main canvas - ${c.w} × ${c.h}`}>
         <TextField label="Output name" value={config.name} onCommit={(v) => update((cfg) => ({ ...cfg, name: v.trim() || cfg.name }))} />
         <ResolutionEditor
           w={c.w}
@@ -628,7 +630,8 @@ export function CanvasSettings({
           </div>
         ) : null}
       </Panel>
-
+      ) : (
+      <>
       <Panel id="snapping" title="Snapping">
         <Check checked={config.snap.enabled} onChange={(v) => setSnap({ enabled: v })}>Snap while dragging</Check>
         <div className="grid grid-cols-2 gap-1 pl-5">
@@ -680,6 +683,8 @@ export function CanvasSettings({
           <SmallButton tone="primary" onClick={() => onLedApply("new", ledW, ledH, ledInfo)}>Add as new screen</SmallButton>
         </div>
       </Panel>
+      </>
+      )}
     </>
   );
 }

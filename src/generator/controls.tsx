@@ -174,6 +174,12 @@ export function SelectField({
 // Which panels are open, remembered for the life of the page (so selecting another screen doesn't fold the inspector shut).
 const openMemory = new Map<string, boolean>();
 
+/** Opens a panel by id from outside (the walkthrough uses this). A panel inside a closed one opens when its parent does. */
+export function openPanel(...ids: string[]) {
+  ids.forEach((id) => openMemory.set(id, true));
+  window.dispatchEvent(new CustomEvent("tpg-open-panel", { detail: ids }));
+}
+
 /**
  * A collapsible module. Closed to begin with. Main modules wear an indigo header and sub-sections inside one a teal
  * header; an open one is brighter, with a yellow edge, so it is clear at both levels which is active.
@@ -195,6 +201,14 @@ export function Panel({
   id?: string;
 }) {
   const [open, setOpenState] = useState(() => (id && openMemory.has(id) ? openMemory.get(id)! : defaultOpen));
+  useEffect(() => {
+    if (!id) return;
+    const on = (e: Event) => {
+      if ((e as CustomEvent<string[]>).detail.includes(id)) setOpenState(true);
+    };
+    window.addEventListener("tpg-open-panel", on);
+    return () => window.removeEventListener("tpg-open-panel", on);
+  }, [id]);
   const toggle = () =>
     setOpenState((v) => {
       if (id) openMemory.set(id, !v);
@@ -209,7 +223,7 @@ export function Panel({
       ? "border-yellow-300 bg-indigo-600 text-white"
       : "border-indigo-800 bg-indigo-950 text-indigo-100 hover:bg-indigo-900";
   return (
-    <section className={`overflow-hidden border shadow-sm ${sub ? "rounded-lg" : "rounded-xl"} ${open ? (sub ? "border-teal-600/70" : "border-indigo-500/70") : "border-slate-700"} bg-slate-900/80`}>
+    <section data-panel={id} className={`overflow-hidden border shadow-sm ${sub ? "rounded-lg bg-slate-800/70" : "rounded-xl bg-slate-900"} ${open ? (sub ? "border-teal-600/70" : "border-indigo-500/70") : sub ? "border-slate-600" : "border-slate-700"}`}>
       <header className={`flex items-center gap-2 border-l-4 px-3 ${sub ? "py-1.5" : "py-2"} ${head}`}>
         <button type="button" className={`flex flex-1 items-center gap-2 text-left font-semibold ${sub ? "text-xs" : "text-sm"}`} onClick={toggle} aria-expanded={open}>
           <span className={`inline-block transition-transform ${open ? "rotate-90 text-yellow-300" : "text-slate-400"}`}>▸</span>
