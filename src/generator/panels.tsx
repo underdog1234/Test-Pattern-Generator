@@ -593,8 +593,8 @@ export function CanvasSettings({
   onLedApply,
   part,
 }: {
-  /** "canvas" is the Main canvas panel; "tools" is Snapping and the LED calculator. */
-  part: "canvas" | "tools";
+  /** which panel to draw: Main canvas, Snapping or the LED calculator. */
+  part: "canvas" | "snapping" | "led";
   config: GeneratorConfig;
   update: (fn: (c: GeneratorConfig) => GeneratorConfig) => void;
   onSavePreset: (p: ResolutionPreset) => void;
@@ -654,8 +654,7 @@ export function CanvasSettings({
           </div>
         ) : null}
       </Panel>
-      ) : (
-      <>
+      ) : part === "snapping" ? (
       <Panel id="snapping" title="Snapping">
         <Check checked={config.snap.enabled} onChange={(v) => setSnap({ enabled: v })}>Snap while dragging</Check>
         <div className="grid grid-cols-2 gap-1 pl-5">
@@ -669,7 +668,7 @@ export function CanvasSettings({
           <NumField label="Snap distance (screen px)" value={config.snap.threshold} min={1} max={64} onCommit={(v) => setSnap({ threshold: v })} />
         </div>
       </Panel>
-
+      ) : (
       <Panel id="led-calc" title="LED wall resolution calculator">
         <div className="text-xs text-slate-400">Work out a resolution from panel rows and columns. Optional - every other part of the generator works with plain pixel sizes.</div>
         <SelectField
@@ -707,7 +706,6 @@ export function CanvasSettings({
           <SmallButton tone="primary" onClick={() => onLedApply("new", ledW, ledH, ledInfo)}>Add as new screen</SmallButton>
         </div>
       </Panel>
-      </>
       )}
     </>
   );

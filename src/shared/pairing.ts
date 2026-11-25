@@ -47,6 +47,10 @@ export type PairingView = {
   qrOpen: boolean;
   /** When the QR code goes by itself (Date.now()), or null. */
   qrUntil: number | null;
+  /** The relay is turning our messages away (rate limit); they are retried. */
+  relayLimited?: boolean;
+  /** The relay stream is open. */
+  relayUp?: boolean;
 };
 
 /** How long the connection QR code stays up. */
@@ -87,6 +91,7 @@ export class PairLink {
     private readonly onMessage: (m: PairMessage) => void,
     private readonly onUp?: (up: boolean) => void,
     private readonly minGapMs = 2500,
+    private readonly onLimited?: (limited: boolean) => void,
   ) {}
 
   private get topic() {
@@ -95,7 +100,7 @@ export class PairLink {
 
   start() {
     this.stop();
-    const es = new EventSource(`${RELAY}/${this.topic}/sse`);
+    const es = new EventSource(`${RELAY}/${this.topic}/sse?since=30s`);
     this.es = es;
     es.onopen = () => this.setUp(true);
     es.onerror = () => this.setUp(false); // EventSource reconnects by itself
@@ -133,7 +138,14 @@ export class PairLink {
     this.lastSent = Date.now();
     try {
       const res = await fetch(`${RELAY}/${this.topic}`, { method: "POST", body: JSON.stringify(msg) });
-      if (res.status === 429) this.backoffUntil = Date.now() + 15000;
+      if (res.status === 429) {
+        // Turned away: wait as long as the relay asks (at least 15 s), then send this again unless something newer is queued.
+        const asked = Number(res.headers?.get?.("Retry-After")) || 0;
+        this.backoffUntil = Date.now() + Math.max(15000, asked * 1000);
+        if (!this.pending) this.pending = msg;
+        if (!this.timer) this.timer = setTimeout(() => void this.flush(), Math.max(0, this.backoffUntil - Date.now()));
+        this.onLimited?.(true);
+      } else this.onLimited?.(false);
     } catch {
       // Offline for a moment; the next status goes out when there is one.
     }
@@ -189,6 +201,8 @@ export const statusRows = (v: PairingView, now: number = Date.now()): StatusRow[
   const r = v.receiver;
   const rows: StatusRow[] = [];
   const age = v.receiverSeenAt === null ? null : now - v.receiverSeenAt;
+  if (v.relayLimited) rows.push({ kind: "warn", text: "Relay busy, retrying", label: "The message relay is busy and turned our message away. Retrying shortly" });
+  else if (v.relayUp === false) rows.push({ kind: "warn", text: "Relay offline", label: "Not connected to the message relay. Check the network" });
   if (!v.joined) rows.push({ kind: "wait", text: "Waiting for receiver", label: "Waiting for the receiver to connect" });
   else if (age !== null && age > 20000) rows.push({ kind: "warn", text: `Receiver quiet ${Math.round(age / 1000)} s`, label: `The receiver has not reported for ${Math.round(age / 1000)} seconds` });
   else rows.push({ kind: "ok", text: "Receiver connected", label: "The receiver is connected" });

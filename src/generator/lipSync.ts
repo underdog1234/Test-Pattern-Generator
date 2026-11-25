@@ -35,22 +35,40 @@ export const lipSyncBeeps: NonNullable<PatternDef["beeps"]> = (s, loopSeconds) =
 let video: HTMLVideoElement | null = null;
 let lastT = NaN;
 let lastWall = 0;
+/** How long a jump takes to land, so the next jump aims that far ahead and does not arrive late. */
+let seekLead = 0.25;
+let seekStart = 0;
+let stuckSince = 0;
+let stuck = false;
 
 const getVideo = (): HTMLVideoElement | null => {
   if (typeof document === "undefined") return null;
   if (!video) {
-    video = document.createElement("video");
-    video.muted = true; // the sound comes from the audio engine, not from this element
-    video.playsInline = true;
-    video.preload = "auto";
-    video.src = mediaUrl(VIDEO.file);
-    video.load();
+    const v = document.createElement("video");
+    video = v;
+    v.muted = true; // the sound comes from the audio engine, not from this element
+    v.playsInline = true;
+    v.preload = "auto";
+    v.src = mediaUrl(VIDEO.file);
+    v.addEventListener("seeked", () => {
+      if (seekStart) seekLead = Math.max(0.1, Math.min(1.5, ((performance.now() - seekStart) / 1000) * 1.3));
+      seekStart = 0;
+    });
+    // If the browser would not start it by itself, any click on the page does.
+    window.addEventListener("pointerdown", () => void v.play().catch(() => undefined), true);
+    v.load();
     void loadMediaClip(LIPSYNC_CLIP); // decode the sound now so it is ready when sound is switched on
   }
   return video;
 };
 
-/** Keep the video on the pattern clock: let it run, nudge its speed for small drift, jump for large. */
+const jump = (v: HTMLVideoElement, to: number) => {
+  if (v.seeking) return;
+  seekStart = performance.now();
+  v.currentTime = Math.max(0, Math.min(LIPSYNC_SECONDS - 0.05, to));
+};
+
+/** Keep the video on the pattern clock: let it run, nudge its speed for small drift, jump (aiming ahead) for large. */
 const follow = (v: HTMLVideoElement, T: number) => {
   const now = performance.now();
   if (T !== lastT) {
@@ -59,19 +77,27 @@ const follow = (v: HTMLVideoElement, T: number) => {
   }
   const still = now - lastWall > 150; // the clock has stopped (paused)
   const inside = T >= 0 && T <= LIPSYNC_SECONDS;
-  const target = Math.max(0, Math.min(LIPSYNC_SECONDS - 0.05, T));
   if (v.readyState < 1) return;
   if (!inside || still) {
     if (!v.paused) v.pause();
-    if (!v.seeking && Math.abs(v.currentTime - target) > 0.04) v.currentTime = target;
+    if (Math.abs(v.currentTime - Math.max(0, T)) > 0.04) jump(v, Math.max(0, T));
+    stuck = false;
     return;
   }
   if (v.paused && !v.seeking) void v.play().catch(() => undefined);
   const drift = v.currentTime - T; // positive: the video is ahead
-  if (Math.abs(drift) > 0.3) {
-    if (!v.seeking) v.currentTime = T;
+  if (Math.abs(drift) > 0.5) {
+    jump(v, T + seekLead);
     v.playbackRate = 1;
-  } else v.playbackRate = Math.abs(drift) > 0.03 ? (drift > 0 ? 0.96 : 1.04) : 1;
+  } else v.playbackRate = Math.abs(drift) > 0.04 ? (drift > 0 ? 0.9 : 1.1) : 1;
+  // Tell the person if the browser is refusing to play it.
+  if (v.paused && !v.seeking) {
+    if (!stuckSince) stuckSince = now;
+    stuck = now - stuckSince > 1500;
+  } else {
+    stuckSince = 0;
+    stuck = false;
+  }
 };
 
 const C = { bg: "#0b1020", yellow: "#F3F4A8", dim: "#94a3b8", text: "#e2e8f0" };
@@ -102,8 +128,17 @@ export const drawLipSync: PatternDef["draw"] = (ctx, w, h, _s, info) => {
   ctx.fillStyle = "#000";
   ctx.fill();
   const ready = !!v && v.readyState >= 2;
-  if (ready && v) ctx.drawImage(v, vx, vy, vw, vh);
-  else {
+  if (ready && v) {
+    ctx.drawImage(v, vx, vy, vw, vh);
+    if (stuck) {
+      ctx.fillStyle = "rgba(2,6,23,0.75)";
+      ctx.fillRect(vx, vy + vh * 0.44, vw, vh * 0.12);
+      ctx.fillStyle = C.yellow;
+      ctx.textAlign = "center";
+      fitText(ctx, "Click this window to start the video", vw * 0.9, vh * 0.035, "bold");
+      ctx.fillText("Click this window to start the video", vx + vw / 2, vy + vh * 0.51);
+    }
+  } else {
     ctx.fillStyle = C.dim;
     ctx.textAlign = "center";
     fitText(ctx, "Loading the video…", vw * 0.8, vh * 0.04, "normal");

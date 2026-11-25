@@ -43,7 +43,8 @@ import {
 import { frameEpochMs } from "./frameClock";
 import OutputPanel from "./OutputPanel";
 import { measureWorldClock } from "../shared/worldClock";
-import { PairLink, QR_SHOW_MS, newSessionId, receiveUrl, type PairingView, type ReceiverStatus } from "../shared/pairing";
+import { PairLink, QR_SHOW_MS, newSessionId, receiveUrl, statusRows, type PairingView, type ReceiverStatus } from "../shared/pairing";
+import { StatusLine } from "../shared/StatusIcon";
 import OutputView from "./OutputView";
 import { BUILT_IN_PLAYLISTS, buildBuiltInPlaylist } from "./presets";
 import { ArrangePanel, CanvasSettings, Inspector, PlaylistPanel, ScreenList, type AlignRef } from "./panels";
@@ -189,10 +190,10 @@ export default function GeneratorApp() {
     return () => channel?.close();
   }, []);
   // An AV Sync Test session: pairing with the receiver on another device - its QR code, and what it reports back.
-  const [pair, setPair] = useState<{ id: string; url: string; joined: boolean; receiver: ReceiverStatus | null; seenAt: number | null; qrUntil: number | null } | null>(null);
+  const [pair, setPair] = useState<{ id: string; url: string; joined: boolean; receiver: ReceiverStatus | null; seenAt: number | null; qrUntil: number | null; relayUp: boolean; limited: boolean } | null>(null);
   const closeQr = useCallback(() => setPair((p) => (p ? { ...p, qrUntil: null } : p)), []);
   const pairingView = useMemo<PairingView | null>(
-    () => (pair ? { url: pair.url, joined: pair.joined, senderClock: playback.world ?? null, receiver: pair.receiver, receiverSeenAt: pair.seenAt, qrOpen: pair.qrUntil !== null, qrUntil: pair.qrUntil } : null),
+    () => (pair ? { url: pair.url, joined: pair.joined, senderClock: playback.world ?? null, receiver: pair.receiver, receiverSeenAt: pair.seenAt, qrOpen: pair.qrUntil !== null, qrUntil: pair.qrUntil, relayUp: pair.relayUp, relayLimited: pair.limited } : null),
     [pair, playback.world],
   );
   const pairLink = useRef<PairLink | null>(null);
@@ -473,10 +474,18 @@ export default function GeneratorApp() {
   const startPairing = () => {
     pairLink.current?.stop();
     const id = newSessionId();
-    setPair({ id, url: receiveUrl(id), joined: false, receiver: null, seenAt: null, qrUntil: Date.now() + QR_SHOW_MS });
-    const link = new PairLink(id, "sender", (m) => {
-      if (m.role === "receiver") setPair((p) => (p && p.id === id ? { ...p, joined: true, receiver: m, seenAt: Date.now() } : p));
-    });
+    setPair({ id, url: receiveUrl(id), joined: false, receiver: null, seenAt: null, qrUntil: Date.now() + QR_SHOW_MS, relayUp: false, limited: false });
+    // The free relay allows about 12 messages a minute, so statuses go out at most every 6 s.
+    const link = new PairLink(
+      id,
+      "sender",
+      (m) => {
+        if (m.role === "receiver") setPair((p) => (p && p.id === id ? { ...p, joined: true, receiver: m, seenAt: Date.now() } : p));
+      },
+      (up) => setPair((p) => (p && p.id === id ? { ...p, relayUp: up } : p)),
+      6000,
+      (limited) => setPair((p) => (p && p.id === id ? { ...p, limited } : p)),
+    );
     link.start();
     pairLink.current = link;
     // The link-delay reading needs the flashes on the second of real time.
@@ -501,7 +510,7 @@ export default function GeneratorApp() {
     if (!pair || !link) return;
     const send = () => link.send({ role: "sender", at: Date.now(), clock: playbackRef.current.world ?? null });
     send();
-    const id = window.setInterval(send, 8000);
+    const id = window.setInterval(send, 20000);
     return () => window.clearInterval(id);
   }, [pair?.id, pair?.joined, playback.world]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -621,100 +630,29 @@ export default function GeneratorApp() {
         <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, false); e.target.value = ""; }} />
         <span className="mx-1 h-5 w-px bg-slate-700" />
         <SmallButton tone="primary" onClick={() => setShowExport(true)} title="Save images, a PDF or a video of the patterns">Download…</SmallButton>
-        <SmallButton className="ml-auto" tone="primary" onClick={() => setShowTour(true)} title="A step-by-step tour of the main panels">? Help</SmallButton>
+        <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-slate-200" aria-label="Clock and connection status">
+          {worldSync.busy ? (
+            <StatusLine kind="wait" text="Syncing clock…" label="Syncing the clock to world time" />
+          ) : playback.world ? (
+            <StatusLine kind="ok" text={`Clock ±${Math.round(playback.world.uncertaintyMs)} ms`} label={`The pattern clock is locked to world time within ${Math.round(playback.world.uncertaintyMs)} milliseconds`} />
+          ) : (
+            <StatusLine kind="off" text="Clock: this device" label="The pattern clock is this device's own clock, not locked to world time" />
+          )}
+          {pairingView ? (
+            statusRows(pairingView, now)
+              .filter((r) => !/^Sender clock|^Syncing sender clock/.test(r.text))
+              .map((r) => <StatusLine key={r.text} kind={r.kind} text={r.text} label={r.label} />)
+          ) : (
+            <StatusLine kind="off" text="No receiver" label="No AV Sync Test session is running" />
+          )}
+        </div>
+        <SmallButton tone="primary" onClick={() => setShowTour(true)} title="A step-by-step tour of the main panels">? Help</SmallButton>
         <a className="text-xs font-semibold text-sky-300 hover:underline" href="./receive.html" target="_blank" rel="noopener" title="Open the AV Sync Test receiver: measure audio / video sync with this device's camera and microphone">AV Sync Test ↗</a>
         <a className="text-xs text-sky-300 hover:underline" href="https://script.google.com/macros/s/AKfycbwsrCoqVwHdQHYPUDIDGv64vjwTF4DfAngFZ0KwUWANx6ZaL2EmRquxgYRIWcQYSCS4/exec" target="_blank" rel="noopener noreferrer">MMS Links ↗</a>
       </header>
 
-      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,46rem)_minmax(0,1fr)]">
-        <div className="min-w-0 space-y-2 xl:sticky xl:top-16 xl:max-h-[calc(100vh-5rem)] xl:self-start xl:overflow-y-auto xl:pr-1">
-          <Panel id="preview" defaultOpen title="Preview">
-          <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="w-20 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Playback</span>
-              <SmallButton active={playback.playing} onClick={() => setPlaying(true)} title="Play (Space toggles)">▶ Play</SmallButton>
-              <SmallButton active={!playback.playing} onClick={() => setPlaying(false)} title="Pause (Space toggles)">❚❚ Pause</SmallButton>
-              <SmallButton onClick={restart} title="Back to the start of the loop">⏮ Restart</SmallButton>
-              <span className="font-mono text-xs text-slate-300">
-                {(currentTime % config.loopSeconds).toFixed(1)}s / {config.loopSeconds}s loop
-              </span>
-              <span className="mx-1 h-5 w-px bg-slate-700" />
-              <Check
-                checked={config.autoCycle.enabled}
-                onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, enabled: v } }))}
-                title="Step every screen through all the test patterns in turn (a running playlist takes over while it plays)"
-              >
-                Auto cycle all patterns
-              </Check>
-              {config.autoCycle.enabled ? (
-                <>
-                  <span className="text-xs text-slate-400">change every</span>
-                  <NumField className="w-16" value={config.autoCycle.seconds} min={1} max={3600} title="Seconds each pattern stays up" onCommit={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, seconds: v } }))} />
-                  <span className="text-xs text-slate-400">seconds</span>
-                  <Check checked={config.autoCycle.stagger} onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, stagger: v } }))} title="Each screen starts one pattern further on, so they all show something different">
-                    Different per screen
-                  </Check>
-                </>
-              ) : null}
-              {playback.playlist.active && activeStep !== null ? (
-                <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Playlist: {config.playlist[activeStep]?.name}</span>
-              ) : null}
-              <span className="ml-auto text-xs text-slate-400">{selectedIds.length ? `${selectedIds.length} selected` : "Nothing selected"}</span>
-            </div>
-          </div>
-          <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
-            <CanvasEditor
-              config={config}
-              frameSource={frameSource}
-              selectedIds={selectedIds}
-              onSelect={setSelectedIds}
-              onBeginEdit={beginEdit}
-              onRects={setRects}
-              maxHeight={editorMaxHeight}
-              paused={!!inlineOutput}
-            />
-          </div>
-          {warnings.length ? (
-            <div className="rounded-lg border border-amber-400/70 bg-amber-500/10 p-2 text-xs text-amber-200">
-              {warnings.map((w, i) => (
-                <div key={i}>⚠ {w}</div>
-              ))}
-            </div>
-          ) : null}
-          </Panel>
-          <OutputPanel
-            config={config}
-            target={outputTarget}
-            onTarget={setOutputTarget}
-            onOpenWindow={() => void openOutputWindow()}
-            onFullscreen={goFullscreen}
-            display={display}
-            onDisplay={patchDisplay}
-            windowStatus={outputWindowLive ? { fullscreen: outputStatus!.fullscreen, oneToOne: outputStatus!.oneToOne } : null}
-            sound={sound}
-            world={playback.world ?? null}
-            worldSync={worldSync}
-            onLockWorld={() => void lockWorld()}
-            onUnlockWorld={unlockWorld}
-            pairing={pairingView}
-            onStartPairing={startPairing}
-            onStopPairing={stopPairing}
-            onCloseQr={closeQr}
-            onShowQr={showQr}
-          />
-        </div>
-
-        <aside className="min-w-0 space-y-2">
-          <CanvasSettings
-              part="canvas"
-              config={config}
-              update={(fn) => update(fn)}
-              onSavePreset={savePreset}
-              onDeletePreset={deletePreset}
-              warnings={[]}
-              hasSelection={selectedIds.length > 0}
-              onLedApply={applyLed}
-            />
+      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
+        <aside className="order-2 min-w-0 space-y-2 xl:order-1">
           <ScreenList
             config={config}
             selectedIds={selectedIds}
@@ -788,8 +726,67 @@ export default function GeneratorApp() {
             onLoopChange={(v) => setPlayback((p) => ({ ...p, playlist: { ...p.playlist, loop: v } }))}
             onLoadBuiltIn={loadBuiltInPlaylist}
           />
+        </aside>
+
+        <div className="order-1 min-w-0 space-y-2 xl:order-2">
+          <Panel id="preview" defaultOpen title="Preview">
+          <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="w-20 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Playback</span>
+              <SmallButton active={playback.playing} onClick={() => setPlaying(true)} title="Play (Space toggles)">▶ Play</SmallButton>
+              <SmallButton active={!playback.playing} onClick={() => setPlaying(false)} title="Pause (Space toggles)">❚❚ Pause</SmallButton>
+              <SmallButton onClick={restart} title="Back to the start of the loop">⏮ Restart</SmallButton>
+              <span className="font-mono text-xs text-slate-300">
+                {(currentTime % config.loopSeconds).toFixed(1)}s / {config.loopSeconds}s loop
+              </span>
+              <span className="mx-1 h-5 w-px bg-slate-700" />
+              <Check
+                checked={config.autoCycle.enabled}
+                onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, enabled: v } }))}
+                title="Step every screen through all the test patterns in turn (a running playlist takes over while it plays)"
+              >
+                Auto cycle all patterns
+              </Check>
+              {config.autoCycle.enabled ? (
+                <>
+                  <span className="text-xs text-slate-400">change every</span>
+                  <NumField className="w-16" value={config.autoCycle.seconds} min={1} max={3600} title="Seconds each pattern stays up" onCommit={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, seconds: v } }))} />
+                  <span className="text-xs text-slate-400">seconds</span>
+                  <Check checked={config.autoCycle.stagger} onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, stagger: v } }))} title="Each screen starts one pattern further on, so they all show something different">
+                    Different per screen
+                  </Check>
+                </>
+              ) : null}
+              {playback.playlist.active && activeStep !== null ? (
+                <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Playlist: {config.playlist[activeStep]?.name}</span>
+              ) : null}
+              <span className="ml-auto text-xs text-slate-400">{selectedIds.length ? `${selectedIds.length} selected` : "Nothing selected"}</span>
+            </div>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
+            <CanvasEditor
+              config={config}
+              frameSource={frameSource}
+              selectedIds={selectedIds}
+              onSelect={setSelectedIds}
+              onBeginEdit={beginEdit}
+              onRects={setRects}
+              maxHeight={editorMaxHeight}
+              paused={!!inlineOutput}
+            />
+          </div>
+          {warnings.length ? (
+            <div className="rounded-lg border border-amber-400/70 bg-amber-500/10 p-2 text-xs text-amber-200">
+              {warnings.map((w, i) => (
+                <div key={i}>⚠ {w}</div>
+              ))}
+            </div>
+          ) : null}
+          </Panel>
+          <div className="grid items-start gap-2 lg:grid-cols-2">
+            <div className="min-w-0 space-y-2">
           <CanvasSettings
-              part="tools"
+              part="canvas"
               config={config}
               update={(fn) => update(fn)}
               onSavePreset={savePreset}
@@ -798,7 +795,51 @@ export default function GeneratorApp() {
               hasSelection={selectedIds.length > 0}
               onLedApply={applyLed}
             />
-        </aside>
+          <CanvasSettings
+              part="snapping"
+              config={config}
+              update={(fn) => update(fn)}
+              onSavePreset={savePreset}
+              onDeletePreset={deletePreset}
+              warnings={[]}
+              hasSelection={selectedIds.length > 0}
+              onLedApply={applyLed}
+            />
+            </div>
+            <div className="min-w-0 space-y-2">
+          <OutputPanel
+            config={config}
+            target={outputTarget}
+            onTarget={setOutputTarget}
+            onOpenWindow={() => void openOutputWindow()}
+            onFullscreen={goFullscreen}
+            display={display}
+            onDisplay={patchDisplay}
+            windowStatus={outputWindowLive ? { fullscreen: outputStatus!.fullscreen, oneToOne: outputStatus!.oneToOne } : null}
+            sound={sound}
+            world={playback.world ?? null}
+            worldSync={worldSync}
+            onLockWorld={() => void lockWorld()}
+            onUnlockWorld={unlockWorld}
+            pairing={pairingView}
+            onStartPairing={startPairing}
+            onStopPairing={stopPairing}
+            onCloseQr={closeQr}
+            onShowQr={showQr}
+          />
+          <CanvasSettings
+              part="led"
+              config={config}
+              update={(fn) => update(fn)}
+              onSavePreset={savePreset}
+              onDeletePreset={deletePreset}
+              warnings={[]}
+              hasSelection={selectedIds.length > 0}
+              onLedApply={applyLed}
+            />
+            </div>
+          </div>
+        </div>
       </div>
 
       {showTour ? (

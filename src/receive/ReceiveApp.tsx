@@ -76,6 +76,7 @@ export default function ReceiveApp() {
   const session = useMemo(() => sessionFromUrl(location.search), []);
   const [sender, setSender] = useState<{ status: SenderStatus; seenAt: number } | null>(null);
   const [relayUp, setRelayUp] = useState(false);
+  const [relayLimited, setRelayLimited] = useState(false);
   const pairLink = useRef<PairLink | null>(null);
   const statusRef = useRef<ReceiverStatus | null>(null);
 
@@ -115,12 +116,12 @@ export default function ReceiveApp() {
 
   useEffect(() => {
     if (!session) return;
-    const link = new PairLink(session, "receiver", (m) => m.role === "sender" && setSender({ status: m, seenAt: Date.now() }), setRelayUp);
+    const link = new PairLink(session, "receiver", (m) => m.role === "sender" && setSender({ status: m, seenAt: Date.now() }), setRelayUp, 6000, setRelayLimited);
     pairLink.current = link;
     link.start();
     // Opening the page is what tells the sender to take its QR code down.
     link.send({ role: "receiver", at: Date.now(), running: false, clock: null, av: null, link: null, fps: 0 });
-    const id = window.setInterval(() => statusRef.current && link.send({ ...statusRef.current, at: Date.now() }), 3000);
+    const id = window.setInterval(() => statusRef.current && link.send({ ...statusRef.current, at: Date.now() }), 8000);
     return () => {
       window.clearInterval(id);
       link.stop();
@@ -407,7 +408,9 @@ export default function ReceiveApp() {
       ? { kind: "off", text: "Not paired", label: "Not paired with a sender. Scan the QR code on the sender to pair." }
       : sender
         ? { kind: "ok", text: "Sender connected", label: "Connected to the sender" }
-        : { kind: pairKind, text: relayUp ? "Connecting…" : "Offline", label: relayUp ? "Connecting to the sender" : "Not connected. Waiting for the network" },
+        : relayLimited
+          ? { kind: "warn", text: "Relay busy, retrying", label: "The message relay is busy and turned our message away. Retrying shortly" }
+          : { kind: pairKind, text: relayUp ? "Connecting…" : "Offline", label: relayUp ? "Connecting to the sender" : "Not connected. Waiting for the network" },
     clock.state === "syncing"
       ? { kind: "wait", text: `Syncing clock ${Math.round(clock.progress * 100)}%`, label: `Syncing this device's clock to world time, ${Math.round(clock.progress * 100)} percent` }
       : myClock

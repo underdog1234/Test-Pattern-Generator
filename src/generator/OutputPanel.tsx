@@ -115,6 +115,15 @@ export default function OutputPanel({ config, target, onTarget, onOpenWindow, on
               {statusRows(pairing).map((r, i) => (
                 <StatusLine key={i} kind={r.kind} text={r.text} label={r.label} />
               ))}
+              {pairing.receiver?.av && pairing.receiver.av.stable && Math.abs(pairing.receiver.av.medianMs) > 8 ? (
+                <SmallButton
+                  tone="primary"
+                  onClick={() => sound.setOffsetMs(Math.max(-1000, Math.min(1000, Math.round(sound.offsetMs + pairing.receiver!.av!.medianMs))))}
+                  title="The receiver measured the sound against the picture. This moves the sound by that amount (added to the current Sound delay) so they line up; measure again to check."
+                >
+                  Correct sound by {pairing.receiver.av.medianMs > 0 ? "+" : ""}{Math.round(pairing.receiver.av.medianMs)} ms
+                </SmallButton>
+              ) : null}
             </div>
           </div>
         ) : null}
