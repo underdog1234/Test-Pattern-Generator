@@ -43,7 +43,7 @@ describe("PairLink", () => {
     const link = new PairLink("abc123def456gh", "sender", (m) => got.push(m), (u) => ups.push(u));
     link.start();
     const es = FakeEventSource.last!;
-    expect(es.url).toBe("https://ntfy.sh/tpg-abc123def456gh/sse?since=30s");
+    expect(es.url).toBe("https://ntfy.sh/tpg-abc123def456gh/sse?since=10m");
     es.onopen!();
     const wrap = (m: object) => ({ data: JSON.stringify({ event: "message", message: JSON.stringify(m) }) });
     es.onmessage!(wrap({ role: "sender", at: 1, clock: null })); // its own echo

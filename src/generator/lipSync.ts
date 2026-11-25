@@ -5,7 +5,7 @@
 // step with the pattern clock like every other sound here; the picture is the clip's video, held to the same clock.
 // ---------------------------------------------------------------------------
 
-import { LIPSYNC_CLIP, loadMediaClip, mediaUrl } from "./clips";
+import { LIPSYNC_CLIP, decodeMediaBytes, mediaUrl } from "./clips";
 import type { PatternDef } from "./patterns";
 import { FONT, fitText, roundRect, wrapLines } from "./textKit";
 
@@ -40,6 +40,41 @@ let seekLead = 0.25;
 let seekStart = 0;
 let stuckSince = 0;
 let stuck = false;
+/** Download progress (0-1) and any problem, shown on the picture while it loads. */
+let loadFrac = 0;
+let loadProblem = "";
+
+/** Download the whole clip (with progress), then hand it to the video element and to the audio decoder. */
+const download = async (v: HTMLVideoElement) => {
+  try {
+    const res = await fetch(mediaUrl(VIDEO.file));
+    if (!res.ok) throw new Error(`the server answered ${res.status}`);
+    const total = Number(res.headers.get("Content-Length")) || 13775484;
+    const parts: Uint8Array[] = [];
+    let got = 0;
+    if (res.body) {
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        got += value.length;
+        loadFrac = Math.min(1, got / total);
+      }
+    } else {
+      parts.push(new Uint8Array(await res.arrayBuffer()));
+    }
+    const blob = new Blob(parts as BlobPart[], { type: "video/webm" });
+    loadProblem = "";
+    v.src = URL.createObjectURL(blob);
+    v.load();
+    // The sound is decoded a moment later, so it does not hold up the first picture.
+    setTimeout(() => void blob.arrayBuffer().then((bytes) => decodeMediaBytes(LIPSYNC_CLIP, bytes)), 1500);
+  } catch (e) {
+    loadProblem = `Could not download the video (${e instanceof Error ? e.message : "network problem"}). Trying again…`;
+    setTimeout(() => void download(v), 5000);
+  }
+};
 
 const getVideo = (): HTMLVideoElement | null => {
   if (typeof document === "undefined") return null;
@@ -49,15 +84,16 @@ const getVideo = (): HTMLVideoElement | null => {
     v.muted = true; // the sound comes from the audio engine, not from this element
     v.playsInline = true;
     v.preload = "auto";
-    v.src = mediaUrl(VIDEO.file);
+    v.addEventListener("error", () => {
+      loadProblem = `This browser could not play the video${v.error?.message ? ` (${v.error.message})` : ""}. Try Chrome or Edge.`;
+    });
     v.addEventListener("seeked", () => {
       if (seekStart) seekLead = Math.max(0.1, Math.min(1.5, ((performance.now() - seekStart) / 1000) * 1.3));
       seekStart = 0;
     });
     // If the browser would not start it by itself, any click on the page does.
     window.addEventListener("pointerdown", () => void v.play().catch(() => undefined), true);
-    v.load();
-    void loadMediaClip(LIPSYNC_CLIP); // decode the sound now so it is ready when sound is switched on
+    void download(v);
   }
   return video;
 };
@@ -141,8 +177,10 @@ export const drawLipSync: PatternDef["draw"] = (ctx, w, h, _s, info) => {
   } else {
     ctx.fillStyle = C.dim;
     ctx.textAlign = "center";
-    fitText(ctx, "Loading the video…", vw * 0.8, vh * 0.04, "normal");
-    ctx.fillText("Loading the video…", vx + vw / 2, vy + vh / 2);
+    const msg = loadProblem || `Loading the video… ${Math.round(loadFrac * 100)}%`;
+    fitText(ctx, "Loading the video… 100%", vw * 0.8, vh * 0.04, "normal");
+    const lines = wrapLines(ctx, msg, vw * 0.8);
+    lines.forEach((l, i) => ctx.fillText(l, vx + vw / 2, vy + vh / 2 + i * vh * 0.05));
   }
 
   // The words beside (or under) it.

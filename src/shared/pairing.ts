@@ -13,6 +13,8 @@
 import { describeOffset } from "../receive/sync";
 
 export const RELAY = "https://ntfy.sh";
+/** The relay address (a test can point this somewhere else with globalThis.__TPG_RELAY). */
+const relayUrl = (): string => (globalThis as { __TPG_RELAY?: string }).__TPG_RELAY ?? RELAY;
 
 export type ClockSummary = { offsetMs: number; uncertaintyMs: number };
 
@@ -49,6 +51,8 @@ export type PairingView = {
   qrUntil: number | null;
   /** The relay is turning our messages away (rate limit); they are retried. */
   relayLimited?: boolean;
+  /** The two devices are talking directly (no relay needed). */
+  direct?: boolean;
   /** The relay stream is open. */
   relayUp?: boolean;
 };
@@ -76,14 +80,63 @@ export const sessionFromUrl = (search: string): string | null => {
   return s && /^[a-z0-9]{8,32}$/.test(s) ? s : null;
 };
 
+type Signal = { kind: "offer" | "answer"; id: string; sdp: string };
+
+const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+
+/** ntfy takes messages up to 4 KB: keep the SDP lean (UDP candidates only, a handful of them). */
+const compactSdp = (sdp: string): string => {
+  let kept = 0;
+  return sdp
+    .split(/\r?\n/)
+    .filter((l) => {
+      if (!l.startsWith("a=candidate:")) return true;
+      if (!/ udp /i.test(l) || kept >= 6) return false;
+      kept += 1;
+      return true;
+    })
+    .join("\r\n");
+};
+
+const gathered = (pc: RTCPeerConnection) =>
+  new Promise<void>((resolve) => {
+    if (pc.iceGatheringState === "complete") return resolve();
+    const t = setTimeout(resolve, 3000);
+    pc.addEventListener("icegatheringstatechange", () => {
+      if (pc.iceGatheringState === "complete") {
+        clearTimeout(t);
+        resolve();
+      }
+    });
+  });
+
+/**
+ * The link between the two devices. The relay (ntfy.sh) is only used to introduce them: they swap a few small
+ * WebRTC messages through it, then talk directly (a data channel), which has no message limits. Until the direct
+ * link is up - or if it never comes up (strict networks) - status messages go through the relay, slowly, because
+ * the free relay allows only a small number of messages a day.
+ */
 export class PairLink {
   private es: EventSource | null = null;
   private lastSent = 0;
   private pending: PairMessage | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private backoffUntil = 0;
-  /** True while the relay stream is open. */
+  private esOpen = false;
+  private lastMsg: PairMessage | null = null;
+  private pc: RTCPeerConnection | null = null;
+  private dc: RTCDataChannel | null = null;
+  private offerId = "";
+  private offers = 0;
+  private reofferTimer: ReturnType<typeof setTimeout> | null = null;
+  private answerTimer: ReturnType<typeof setTimeout> | null = null;
+  private waitingOffer: Signal | null = null;
+  private answeredId = "";
+  private stopped = false;
+  /** True while the relay stream or the direct link is open. */
   up = false;
+  /** True while the direct link is open. */
+  direct = false;
 
   constructor(
     private readonly sessionId: string,
@@ -92,6 +145,7 @@ export class PairLink {
     private readonly onUp?: (up: boolean) => void,
     private readonly minGapMs = 2500,
     private readonly onLimited?: (limited: boolean) => void,
+    private readonly onDirect?: (direct: boolean) => void,
   ) {}
 
   private get topic() {
@@ -100,30 +154,172 @@ export class PairLink {
 
   start() {
     this.stop();
-    const es = new EventSource(`${RELAY}/${this.topic}/sse?since=30s`);
+    this.stopped = false;
+    const es = new EventSource(`${relayUrl()}/${this.topic}/sse?since=10m`);
     this.es = es;
-    es.onopen = () => this.setUp(true);
-    es.onerror = () => this.setUp(false); // EventSource reconnects by itself
+    es.onopen = () => {
+      this.esOpen = true;
+      this.refreshUp();
+    };
+    es.onerror = () => {
+      this.esOpen = false; // EventSource reconnects by itself
+      this.refreshUp();
+    };
     es.onmessage = (e: MessageEvent<string>) => {
       try {
         const outer = JSON.parse(e.data) as { event?: string; message?: string };
         if (outer.event && outer.event !== "message") return;
-        const m = JSON.parse(outer.message ?? "") as PairMessage;
-        if (m && (m.role === "sender" || m.role === "receiver") && m.role !== this.role) this.onMessage(m);
+        const m = JSON.parse(outer.message ?? "") as PairMessage & { signal?: Signal };
+        if (!m || (m.role !== "sender" && m.role !== "receiver") || m.role === this.role) return;
+        if (m.signal) void this.onSignal(m.signal);
+        else this.onMessage(m);
       } catch {
         // Not one of ours; ignore.
       }
     };
+    if (this.role === "sender" && typeof RTCPeerConnection !== "undefined") void this.makeOffer();
   }
 
-  private setUp(up: boolean) {
+  private refreshUp() {
+    const up = this.esOpen || this.direct;
     if (this.up === up) return;
     this.up = up;
     this.onUp?.(up);
   }
 
-  /** Send a status. The relay is free and rate limited, so bursts are merged and only the newest goes out. */
+  // --- the direct link ------------------------------------------------------------
+
+  private bindChannel(dc: RTCDataChannel) {
+    this.dc = dc;
+    dc.onopen = () => {
+      this.direct = true;
+      this.onDirect?.(true);
+      this.onLimited?.(false);
+      this.refreshUp();
+      if (this.lastMsg) this.send(this.lastMsg);
+    };
+    dc.onclose = () => {
+      if (this.dc !== dc) return;
+      this.direct = false;
+      this.onDirect?.(false);
+      this.refreshUp();
+      if (this.role === "sender" && !this.stopped) this.scheduleOffer(3000);
+    };
+    dc.onmessage = (e: MessageEvent<string>) => {
+      try {
+        const m = JSON.parse(e.data) as PairMessage;
+        if (m && (m.role === "sender" || m.role === "receiver") && m.role !== this.role) this.onMessage(m);
+      } catch {
+        // ignore
+      }
+    };
+  }
+
+  private closePeer() {
+    const pc = this.pc;
+    this.pc = null;
+    this.dc = null;
+    try {
+      pc?.close();
+    } catch {
+      // already closed
+    }
+  }
+
+  private scheduleOffer(ms: number) {
+    if (this.reofferTimer) clearTimeout(this.reofferTimer);
+    this.reofferTimer = setTimeout(() => void this.makeOffer(), ms);
+  }
+
+  /** Sender: make an offer and post it; if nobody answers, offer again (a fresh offer each time, newest wins). */
+  private async makeOffer() {
+    if (this.stopped || this.direct || typeof RTCPeerConnection === "undefined") return;
+    this.closePeer();
+    this.offers += 1;
+    try {
+      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      this.pc = pc;
+      this.bindChannel(pc.createDataChannel("tpg"));
+      await pc.setLocalDescription(await pc.createOffer());
+      await gathered(pc);
+      if (this.stopped || this.pc !== pc || !pc.localDescription) return;
+      this.offerId = `${Date.now().toString(36)}${this.offers}`;
+      void this.post({ role: this.role, signal: { kind: "offer", id: this.offerId, sdp: compactSdp(pc.localDescription.sdp) } });
+    } catch {
+      // No WebRTC here; the relay carries everything.
+    }
+    // Keep offering for a while in case the other side opens late.
+    if (this.offers < 12) this.scheduleOffer(this.offers < 3 ? 25000 : 60000);
+  }
+
+  private async onSignal(sig: Signal) {
+    if (this.stopped || this.direct || typeof RTCPeerConnection === "undefined") return;
+    if (this.role === "sender") {
+      if (sig.kind !== "answer" || sig.id !== this.offerId || !this.pc || this.pc.signalingState !== "have-local-offer") return;
+      try {
+        await this.pc.setRemoteDescription({ type: "answer", sdp: sig.sdp });
+      } catch {
+        // stale answer
+      }
+      return;
+    }
+    if (sig.kind !== "offer" || sig.id === this.answeredId) return;
+    // Offers may arrive in a burst (the relay replays recent ones): answer only the newest.
+    this.waitingOffer = sig;
+    if (this.answerTimer) clearTimeout(this.answerTimer);
+    this.answerTimer = setTimeout(() => void this.answer(), 400);
+  }
+
+  private async answer() {
+    const sig = this.waitingOffer;
+    this.waitingOffer = null;
+    if (!sig || this.stopped || this.direct) return;
+    this.answeredId = sig.id;
+    try {
+      this.closePeer();
+      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      this.pc = pc;
+      pc.ondatachannel = (e) => this.bindChannel(e.channel);
+      await pc.setRemoteDescription({ type: "offer", sdp: sig.sdp });
+      await pc.setLocalDescription(await pc.createAnswer());
+      await gathered(pc);
+      if (this.stopped || this.pc !== pc || !pc.localDescription) return;
+      void this.post({ role: this.role, signal: { kind: "answer", id: sig.id, sdp: compactSdp(pc.localDescription.sdp) } });
+    } catch {
+      // Falls back to the relay.
+    }
+  }
+
+  /** A small, important message (a WebRTC introduction): tried a few times if the relay turns it away. */
+  private async post(body: object, tries = 4) {
+    for (let i = 0; i < tries && !this.stopped && !this.direct; i += 1) {
+      try {
+        const res = await fetch(`${relayUrl()}/${this.topic}`, { method: "POST", body: JSON.stringify(body) });
+        if (res.status !== 429) return;
+        this.onLimited?.(true);
+      } catch {
+        // offline: try again
+      }
+      await new Promise((r) => setTimeout(r, 15000));
+    }
+  }
+
+  // --- status messages ----------------------------------------------------------------
+
+  /**
+   * Send a status. Over the direct link it goes at once. Through the relay (free, and limited to a few messages a
+   * day) bursts are merged and only the newest goes out, no more often than the gap allows.
+   */
   send(msg: PairMessage, now = Date.now()) {
+    this.lastMsg = msg;
+    if (this.dc && this.dc.readyState === "open") {
+      try {
+        this.dc.send(JSON.stringify(msg));
+        return;
+      } catch {
+        // fall through to the relay
+      }
+    }
     this.pending = msg;
     if (this.timer) return;
     const wait = Math.max(0, this.lastSent + this.minGapMs - now, this.backoffUntil - now);
@@ -134,10 +330,10 @@ export class PairLink {
     this.timer = null;
     const msg = this.pending;
     this.pending = null;
-    if (!msg) return;
+    if (!msg || this.direct) return;
     this.lastSent = Date.now();
     try {
-      const res = await fetch(`${RELAY}/${this.topic}`, { method: "POST", body: JSON.stringify(msg) });
+      const res = await fetch(`${relayUrl()}/${this.topic}`, { method: "POST", body: JSON.stringify(msg) });
       if (res.status === 429) {
         // Turned away: wait as long as the relay asks (at least 15 s), then send this again unless something newer is queued.
         const asked = Number(res.headers?.get?.("Retry-After")) || 0;
@@ -152,12 +348,17 @@ export class PairLink {
   }
 
   stop() {
+    this.stopped = true;
     this.es?.close();
     this.es = null;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
+    this.esOpen = false;
+    for (const t of [this.timer, this.reofferTimer, this.answerTimer]) if (t) clearTimeout(t);
+    this.timer = this.reofferTimer = this.answerTimer = null;
     this.pending = null;
-    this.setUp(false);
+    this.closePeer();
+    this.direct = false;
+    this.offers = 0;
+    this.refreshUp();
   }
 }
 
@@ -201,8 +402,8 @@ export const statusRows = (v: PairingView, now: number = Date.now()): StatusRow[
   const r = v.receiver;
   const rows: StatusRow[] = [];
   const age = v.receiverSeenAt === null ? null : now - v.receiverSeenAt;
-  if (v.relayLimited) rows.push({ kind: "warn", text: "Relay busy, retrying", label: "The message relay is busy and turned our message away. Retrying shortly" });
-  else if (v.relayUp === false) rows.push({ kind: "warn", text: "Relay offline", label: "Not connected to the message relay. Check the network" });
+  if (v.relayLimited && !v.direct) rows.push({ kind: "warn", text: "Relay busy, retrying", label: "The message relay is busy and turned our message away. Retrying shortly" });
+  else if (v.relayUp === false && !v.direct) rows.push({ kind: "warn", text: "Relay offline", label: "Not connected to the message relay. Check the network" });
   if (!v.joined) rows.push({ kind: "wait", text: "Waiting for receiver", label: "Waiting for the receiver to connect" });
   else if (age !== null && age > 20000) rows.push({ kind: "warn", text: `Receiver quiet ${Math.round(age / 1000)} s`, label: `The receiver has not reported for ${Math.round(age / 1000)} seconds` });
   else rows.push({ kind: "ok", text: "Receiver connected", label: "The receiver is connected" });

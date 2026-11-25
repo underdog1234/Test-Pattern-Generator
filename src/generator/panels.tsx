@@ -139,6 +139,7 @@ export function ScreenList({
   return (
     <Panel
       id="screens"
+      defaultOpen
       title={`Sub-screens (${config.screens.length})`}
       actions={<SmallButton tone="primary" onClick={onAdd} title="Add a sub-screen">+ Add</SmallButton>}
     >
@@ -379,7 +380,7 @@ export function Inspector({
   const H = config.canvas.h;
   const place = (x: number, y: number) => onPatch({ x: Math.round(x), y: Math.round(y) });
   return (
-    <Panel id="inspector" title={<span>Screen settings: <span style={{ color: screen.color }}>{screen.name}</span>{selectionCount > 1 ? <span className="text-slate-400"> (+{selectionCount - 1} more selected)</span> : null}</span>}>
+    <Panel id="inspector" defaultOpen title={<span>Screen settings: <span style={{ color: screen.color }}>{screen.name}</span>{selectionCount > 1 ? <span className="text-slate-400"> (+{selectionCount - 1} more selected)</span> : null}</span>}>
       <div className="grid grid-cols-[1fr_auto] items-end gap-2">
         <TextField label="Name" value={screen.name} onCommit={(v) => onPatch({ name: v.trim() || screen.name })} />
         <ColorField value={screen.color} onChange={(v) => onPatch({ color: v })} />
@@ -418,7 +419,7 @@ export function Inspector({
         </div>
       </Panel>
 
-      <Panel title={`Test patterns - ${def.name}`} level="sub" id="inspector-patterns">
+      <Panel title={`Test patterns - ${def.name}`} level="sub" id="inspector-patterns" defaultOpen>
         <PatternPicker value={screen.pattern} onChange={(id) => onPatch({ pattern: id })} allowLedLayout={!!screen.ledLayout} />
         {screen.pattern === LED_LAYOUT_PATTERN_ID ? (
           <div className="text-xs text-slate-400">
@@ -620,7 +621,6 @@ export function CanvasSettings({
     <>
       {part === "canvas" ? (
       <Panel id="canvas" defaultOpen title={`Main canvas - ${c.w} × ${c.h}`}>
-        <TextField label="Output name" value={config.name} onCommit={(v) => update((cfg) => ({ ...cfg, name: v.trim() || cfg.name }))} />
         <ResolutionEditor
           w={c.w}
           h={c.h}

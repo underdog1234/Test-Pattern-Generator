@@ -234,6 +234,23 @@ export const mediaUrl = (file: string) => `${baseUrl()}${file}`;
 
 const mediaLoading = new Map<string, Promise<void>>();
 
+/** Decode the sound of a media file that is already in memory (the picture's own download is reused). */
+export const decodeMediaBytes = (id: string, bytes: ArrayBuffer): Promise<void> => {
+  if (cache.has(id) || typeof OfflineAudioContext === "undefined") return Promise.resolve();
+  const hit = mediaLoading.get(id);
+  if (hit) return hit;
+  const job = new OfflineAudioContext(2, 1, 48000)
+    .decodeAudioData(bytes)
+    .then((buf) => {
+      cache.set(id, { rate: buf.sampleRate, channels: Array.from({ length: buf.numberOfChannels }, (_, i) => buf.getChannelData(i).slice()) });
+    })
+    .catch(() => {
+      mediaLoading.delete(id);
+    });
+  mediaLoading.set(id, job);
+  return job;
+};
+
 /** Fetch and decode a media clip's sound (once, on demand: these files are large). */
 export const loadMediaClip = (id: string): Promise<void> => {
   if (cache.has(id)) return Promise.resolve();

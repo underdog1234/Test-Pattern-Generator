@@ -190,10 +190,10 @@ export default function GeneratorApp() {
     return () => channel?.close();
   }, []);
   // An AV Sync Test session: pairing with the receiver on another device - its QR code, and what it reports back.
-  const [pair, setPair] = useState<{ id: string; url: string; joined: boolean; receiver: ReceiverStatus | null; seenAt: number | null; qrUntil: number | null; relayUp: boolean; limited: boolean } | null>(null);
+  const [pair, setPair] = useState<{ id: string; url: string; joined: boolean; receiver: ReceiverStatus | null; seenAt: number | null; qrUntil: number | null; relayUp: boolean; limited: boolean; direct: boolean } | null>(null);
   const closeQr = useCallback(() => setPair((p) => (p ? { ...p, qrUntil: null } : p)), []);
   const pairingView = useMemo<PairingView | null>(
-    () => (pair ? { url: pair.url, joined: pair.joined, senderClock: playback.world ?? null, receiver: pair.receiver, receiverSeenAt: pair.seenAt, qrOpen: pair.qrUntil !== null, qrUntil: pair.qrUntil, relayUp: pair.relayUp, relayLimited: pair.limited } : null),
+    () => (pair ? { url: pair.url, joined: pair.joined, senderClock: playback.world ?? null, receiver: pair.receiver, receiverSeenAt: pair.seenAt, qrOpen: pair.qrUntil !== null, qrUntil: pair.qrUntil, relayUp: pair.relayUp, relayLimited: pair.limited, direct: pair.direct } : null),
     [pair, playback.world],
   );
   const pairLink = useRef<PairLink | null>(null);
@@ -474,8 +474,8 @@ export default function GeneratorApp() {
   const startPairing = () => {
     pairLink.current?.stop();
     const id = newSessionId();
-    setPair({ id, url: receiveUrl(id), joined: false, receiver: null, seenAt: null, qrUntil: Date.now() + QR_SHOW_MS, relayUp: false, limited: false });
-    // The free relay allows about 12 messages a minute, so statuses go out at most every 6 s.
+    setPair({ id, url: receiveUrl(id), joined: false, receiver: null, seenAt: null, qrUntil: Date.now() + QR_SHOW_MS, relayUp: false, limited: false, direct: false });
+    // Status goes straight to the receiver when the direct link is up; through the free relay (a few messages a day) it is rare.
     const link = new PairLink(
       id,
       "sender",
@@ -483,8 +483,9 @@ export default function GeneratorApp() {
         if (m.role === "receiver") setPair((p) => (p && p.id === id ? { ...p, joined: true, receiver: m, seenAt: Date.now() } : p));
       },
       (up) => setPair((p) => (p && p.id === id ? { ...p, relayUp: up } : p)),
-      6000,
+      20000,
       (limited) => setPair((p) => (p && p.id === id ? { ...p, limited } : p)),
+      (direct) => setPair((p) => (p && p.id === id ? { ...p, direct } : p)),
     );
     link.start();
     pairLink.current = link;
@@ -510,7 +511,7 @@ export default function GeneratorApp() {
     if (!pair || !link) return;
     const send = () => link.send({ role: "sender", at: Date.now(), clock: playbackRef.current.world ?? null });
     send();
-    const id = window.setInterval(send, 20000);
+    const id = window.setInterval(send, 5000);
     return () => window.clearInterval(id);
   }, [pair?.id, pair?.joined, playback.world]); // eslint-disable-line react-hooks/exhaustive-deps
 
