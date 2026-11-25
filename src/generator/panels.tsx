@@ -19,6 +19,8 @@ import {
   type ResolutionPreset,
   type SubScreen,
 } from "./model";
+import { mediaUrl } from "./clips";
+import { LIPSYNC_CREDIT } from "./lipSync";
 import { AUDIO_STEPS, AUDIO_TEST_SECONDS, audioPlan, audioStepKey, enabledSeconds } from "./audioTest";
 import { LED_LAYOUT_PATTERN_ID, PATTERNS, PATTERN_BY_ID, patternName, resolveSettings, type ParamDef } from "./patterns";
 
@@ -231,6 +233,27 @@ export function PatternPicker({ value, onChange, allowLedLayout }: { value: stri
 }
 
 // ---------------------------------------------------------------------------
+// The lip sync clip's player, with the credit the licence asks for beside it.
+// ---------------------------------------------------------------------------
+
+function LipSyncCredit() {
+  const c = LIPSYNC_CREDIT;
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-slate-700 bg-slate-950/40 p-2">
+      <video className="h-40 shrink-0 rounded-md bg-black" src={mediaUrl("video/accents.webm")} controls preload="none" playsInline aria-label={c.title} />
+      <div className="min-w-0 space-y-1 text-xs text-slate-300">
+        <div className="font-semibold text-white">{c.title}</div>
+        <div>
+          <a className="text-sky-300 underline" href={c.fileUrl} target="_blank" rel="noopener noreferrer">{c.artist}</a>,{" "}
+          <a className="text-sky-300 underline" href={c.licenseUrl} target="_blank" rel="noopener noreferrer">{c.license}</a>, via Wikimedia Commons.
+        </div>
+        <div className="text-[11px] text-slate-400">This player is only for a look. The test itself plays on the output, in step with the loop.</div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The audio test list: a tick box and a button for each test.
 // ---------------------------------------------------------------------------
 
@@ -410,6 +433,7 @@ export function Inspector({
             </div>
           ))}
         </div>
+        {def.id === "lip-sync" ? <LipSyncCredit /> : null}
         {def.id === "audio-test" ? <AudioTestList settings={settings} loopSeconds={config.loopSeconds} onSettings={setSettings} onLoopSeconds={onLoopSeconds} onRestart={onRestart} /> : null}
         {needLoop && config.loopSeconds < needLoop ? (
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-400 bg-amber-500/15 p-2 text-xs text-amber-200">

@@ -9,6 +9,7 @@
 // the one thing it must never do.
 // ---------------------------------------------------------------------------
 
+import { LIPSYNC_MIN_LOOP } from "./lipSync";
 import { AUDIO_TEST_SECONDS } from "./audioTest";
 
 export type Rect = { x: number; y: number; w: number; h: number };
@@ -307,11 +308,11 @@ export const audioTestConfig = (): GeneratorConfig => ({
   loopSeconds: AUDIO_TEST_SECONDS,
 });
 
-/** One 1080p screen with the speaking face. */
+/** One 1080p screen with the lip sync video clip. */
 export const lipSyncConfig = (): GeneratorConfig => ({
   ...baseConfig({ w: 1920, h: 1080 }, [makeScreen(0, { name: "Lip sync", x: 0, y: 0, w: 1920, h: 1080, pattern: "lip-sync" })]),
   name: "Lip sync",
-  loopSeconds: 24,
+  loopSeconds: LIPSYNC_MIN_LOOP, // the whole clip plays before the loop repeats
 });
 
 /** What a new configuration starts as. */
@@ -324,7 +325,7 @@ export const LAYOUT_PRESETS: LayoutPreset[] = [
   { id: "standard-1080p", name: "Standard 1080p (16:9)", description: "One screen, 1920 × 1080", build: standard1080pConfig },
   { id: "av-sync-check", name: "AV Sync Test", description: "One screen flashing and beeping once a second. Start the session in the Output section, then scan the QR code with a phone", build: avSyncCheckConfig },
   { id: "audio-tests", name: "Audio tests", description: "Left, right, stereo sweep, phase, music and frequency sweep, announced by a voice - turn sound on in the Output section", build: audioTestConfig },
-  { id: "lip-sync", name: "Lip sync", description: "An illustrated face speaking a passage, to check sound and picture line up", build: lipSyncConfig },
+  { id: "lip-sync", name: "Lip sync", description: "A real person speaking on video (1 min 42 s), to check sound and picture line up", build: lipSyncConfig },
   { id: "four-screens", name: "Four screens on 4K", description: "Four 1920 × 1080 screens on a 3840 × 2160 canvas", build: fourScreenConfig },
   { id: "empty", name: "Empty canvas", description: "3840 × 2160, no screens", build: () => baseConfig(LEGACY_CANVAS, []) },
 ];

@@ -946,9 +946,8 @@ export const PATTERNS: PatternDef[] = [
     { key: "color", label: "Flash colour", type: "color", default: "#ffffff" },
   ], draw: drawAvSync, beeps: avSyncBeeps },
   { id: "audio-test", name: "Audio Tests (stereo, phase, music, sweep)", category: "Audio", animated: true, minLoopSeconds: AUDIO_TEST_SECONDS, params: AUDIO_TEST_PARAMS, draw: drawAudioTest, beeps: audioTestBeeps },
-  { id: "lip-sync", name: "Lip Sync (speaking face)", category: "Audio", animated: true, minLoopSeconds: LIPSYNC_MIN_LOOP, params: [
+  { id: "lip-sync", name: "Lip Sync (video clip)", category: "Audio", animated: true, minLoopSeconds: LIPSYNC_MIN_LOOP, params: [
     { key: "volume", label: "Volume", type: "number", min: 5, max: 100, step: 5, default: 80 },
-    { key: "subtitles", label: "Show the words", type: "boolean", default: true },
   ], draw: drawLipSync, beeps: lipSyncBeeps },
   { id: "pixel", name: "Pixel Structure", category: "Geometry", animated: false, params: [
     { key: "mode", label: "Mode", type: "select", options: [

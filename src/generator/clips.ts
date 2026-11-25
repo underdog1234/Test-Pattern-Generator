@@ -177,7 +177,6 @@ export const SPEECH_CLIPS: Record<string, string> = {
   "speech-pan": "pan.wav",
   "speech-music": "music.wav",
   "speech-sweep": "sweep.wav",
-  "speech-lipsync": "lipsync.wav",
 };
 
 const SYNTH: Record<string, () => ClipData> = {
@@ -224,6 +223,38 @@ export const loadSpeechClips = (ctx: BaseAudioContext): Promise<void> => {
       loading = null; // try again next time sound is switched on
     });
   return loading;
+};
+
+/** The sound of the lip sync video, decoded from the clip's own track (video/accents.webm). */
+export const LIPSYNC_CLIP = "lipsync-video";
+const MEDIA_CLIPS: Record<string, string> = { [LIPSYNC_CLIP]: "video/accents.webm" };
+
+const baseUrl = () => (typeof import.meta !== "undefined" && import.meta.env?.BASE_URL ? import.meta.env.BASE_URL : "./");
+export const mediaUrl = (file: string) => `${baseUrl()}${file}`;
+
+const mediaLoading = new Map<string, Promise<void>>();
+
+/** Fetch and decode a media clip's sound (once, on demand: these files are large). */
+export const loadMediaClip = (id: string): Promise<void> => {
+  if (cache.has(id)) return Promise.resolve();
+  const file = MEDIA_CLIPS[id];
+  if (!file || typeof OfflineAudioContext === "undefined") return Promise.resolve();
+  const hit = mediaLoading.get(id);
+  if (hit) return hit;
+  const job = fetch(mediaUrl(file))
+    .then((res) => {
+      if (!res.ok) throw new Error(`${file}: ${res.status}`);
+      return res.arrayBuffer();
+    })
+    .then((bytes) => new OfflineAudioContext(2, 1, 48000).decodeAudioData(bytes))
+    .then((buf) => {
+      cache.set(id, { rate: buf.sampleRate, channels: Array.from({ length: buf.numberOfChannels }, (_, i) => buf.getChannelData(i).slice()) });
+    })
+    .catch(() => {
+      mediaLoading.delete(id); // try again next time
+    });
+  mediaLoading.set(id, job);
+  return job;
 };
 
 export const hasClip = (id: string) => cache.has(id) || id in SYNTH;

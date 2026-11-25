@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AUDIO_STEPS, AUDIO_TEST_SECONDS, audioPlan, audioStepKey, audioTestBeeps, audioTestMoment, enabledSeconds } from "./audioTest";
 import { MUSIC_SECONDS, PAN, SWEEP, clipData, musicBeat, panPosition, pinkNoise, sweepHz } from "./clips";
-import { LIPSYNC_SECONDS, LIPSYNC_VISEMES, LIPSYNC_WORDS } from "./lipsyncData";
-import { LIPSYNC_LEAD, VISEME_MOUTH, lipSyncBeeps, mouthAt } from "./lipSync";
+import { LIPSYNC_CREDIT, LIPSYNC_LEAD, LIPSYNC_MIN_LOOP, LIPSYNC_SECONDS, lipSyncBeeps } from "./lipSync";
 import { PATTERN_BY_ID, resolveSettings } from "./patterns";
 import { monoBeeps, renderBeepSamples } from "./audio";
 import { LAYOUT_PRESETS } from "./model";
@@ -201,31 +200,18 @@ describe("clips", () => {
 });
 
 describe("lip sync", () => {
-  it("closes the lips on p, b and m, opens wide on aa, and purses on oo", () => {
-    const at = (v: number) => LIPSYNC_VISEMES.find((x) => x[2] === v && x[1] > 0.06)!;
-    const p = at(21);
-    expect(mouthAt(p[0] + p[1] * 0.8).open).toBeLessThan(0.12);
-    const aa = at(2);
-    expect(mouthAt(aa[0] + aa[1] * 0.9).open).toBeGreaterThan(0.5);
-    const oo = at(7);
-    expect(mouthAt(oo[0] + oo[1] * 0.9).round).toBeGreaterThan(0.5);
-    expect(VISEME_MOUTH).toHaveLength(22);
-  });
-
-  it("is closed before and after the speech, and the speech data is in order", () => {
-    expect(mouthAt(-1).open).toBe(0);
-    expect(mouthAt(LIPSYNC_SECONDS + 5).open).toBe(0);
-    LIPSYNC_VISEMES.slice(1).forEach((v, i) => expect(v[0]).toBeGreaterThanOrEqual(LIPSYNC_VISEMES[i][0]));
-    LIPSYNC_WORDS.slice(1).forEach((w, i) => expect(w[0]).toBeGreaterThanOrEqual(LIPSYNC_WORDS[i][0]));
-    expect(LIPSYNC_WORDS.length).toBe(50);
-  });
-
-  it("plays the speech once, a moment after the loop starts, only if it fits", () => {
+  it("plays the clip once, a moment after the loop starts, only if the whole clip fits", () => {
     const s = settings("lip-sync");
-    const b = lipSyncBeeps(s, 24);
+    const b = lipSyncBeeps(s, LIPSYNC_MIN_LOOP);
     expect(b).toHaveLength(1);
     expect(b[0].at).toBe(LIPSYNC_LEAD);
-    expect(b[0].clip).toBe("speech-lipsync");
-    expect(lipSyncBeeps(s, 10)).toEqual([]);
+    expect(b[0].clip).toBe("lipsync-video");
+    expect(b[0].duration).toBeCloseTo(LIPSYNC_SECONDS, 2);
+    expect(lipSyncBeeps(s, 24)).toEqual([]);
+  });
+
+  it("credits the clip's author and licence", () => {
+    expect(LIPSYNC_CREDIT.line).toBe("Sarah Valentine Actors Accent Coach, CC BY 3.0, via Wikimedia Commons.");
+    expect(LIPSYNC_CREDIT.licenseUrl).toBe("https://creativecommons.org/licenses/by/3.0");
   });
 });
